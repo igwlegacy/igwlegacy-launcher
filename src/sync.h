@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <string>
+#include <vector>
 
 namespace igwl {
 
@@ -25,7 +26,9 @@ struct SyncOptions {
     std::string base_url;        // manifest.json, manifest.json.sig, files/ below it
     std::string public_key_hex;  // Ed25519 key manifest.json.sig must verify against
     fs::path root;               // local directory to sync
-    fs::path launcher;           // the running launcher, never overwritten or deleted
+    // The running launcher and its config file: never overwritten or
+    // deleted, even if the manifest lists them.
+    std::vector<fs::path> protected_files;
 };
 
 // Receives progress from the sync. Called on the sync's own thread.

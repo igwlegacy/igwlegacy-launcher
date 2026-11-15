@@ -1,12 +1,16 @@
 #include "gui.h"
 
 #include "platform.h"
+#include "settings.h"
+
+#include "igwl_config.h"
 
 #include <FL/Fl.H>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_Browser.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Double_Window.H>
+#include <FL/Fl_Input.H>
 #include <FL/Fl_Progress.H>
 #include <FL/Fl_Return_Button.H>
 #include <FL/fl_ask.H>
@@ -31,48 +35,58 @@ namespace {
 // starting and joining the thread) happens on the main thread.
 class LauncherWindow : public SyncObserver {
 public:
-    LauncherWindow(const SyncOptions& options, bool launch)
+    LauncherWindow(const SyncOptions& options, const GuiContext& context, bool launch)
         : options_(options),
+          context_(context),
           launch_(launch),
           cancel_(false),
           running_(false),
           close_requested_(false),
           exit_code_(0) {
-        window_ = new Fl_Double_Window(600, 380, "IGW Legacy Launcher " IGWL_VERSION);
+        window_ = new Fl_Double_Window(600, 415, "IGW Legacy Launcher " IGWL_VERSION);
         window_->callback(on_close, this);
 
         status_ = new Fl_Box(15, 10, 570, 30, "Press Start to update and launch the game.");
         status_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_CLIP);
         status_->labelfont(FL_HELVETICA_BOLD);
 
-        log_ = new Fl_Browser(15, 45, 570, 200);
+        // Where to sync from. Saved next to the launcher when Start is
+        // pressed with a changed value; clearing it restores the default.
+        url_input_ = new Fl_Input(95, 45, 490, 25, "Server URL:");
+        url_input_->value(options_.base_url.c_str());
+        url_input_->tooltip("The address the game files are downloaded from. "
+                            "Leave empty for the default server.");
+
+        log_ = new Fl_Browser(15, 80, 570, 200);
         log_->textsize(12);
 
-        current_ = new Fl_Progress(15, 265, 570, 20, "Current file");
+        current_ = new Fl_Progress(15, 300, 570, 20, "Current file");
         current_->align(FL_ALIGN_TOP_LEFT);
         current_->minimum(0);
         current_->maximum(1);
         current_->selection_color(FL_BLUE);
         current_->labelsize(12);
 
-        overall_ = new Fl_Progress(15, 305, 570, 20, "Overall");
+        overall_ = new Fl_Progress(15, 340, 570, 20, "Overall");
         overall_->align(FL_ALIGN_TOP_LEFT);
         overall_->minimum(0);
         overall_->maximum(1);
         overall_->selection_color(FL_DARK_GREEN);
         overall_->labelsize(12);
 
-        cancel_button_ = new Fl_Button(385, 340, 95, 28, "Quit");
+        cancel_button_ = new Fl_Button(385, 375, 95, 28, "Quit");
         cancel_button_->callback(on_cancel, this);
 
-        start_button_ = new Fl_Return_Button(490, 340, 95, 28, "Start");
+        start_button_ = new Fl_Return_Button(490, 375, 95, 28, "Start");
         start_button_->callback(on_start, this);
 
         window_->resizable(log_);
         window_->end();
 
         log("Game directory: " + options_.root.u8string());
-        log("Server: " + options_.base_url);
+        if (!context_.settings_error.empty()) {
+            log("Ignoring the saved settings: " + context_.settings_error);
+        }
     }
 
     ~LauncherWindow() {
@@ -155,9 +169,50 @@ private:
         }
     }
 
+    // Takes over the server URL from the input field, saving it if it was
+    // changed. Returns false (after telling the user) if it is not usable.
+    bool apply_server_url() {
+        std::string url = url_input_->value();
+        // Empty means the default; spaces only count as empty too.
+        const bool use_default = url.find_first_not_of(" \t\r\n") == std::string::npos;
+        if (use_default) {
+            url = IGWL_BASE_URL;
+        }
+        std::string error;
+        if (!normalize_base_url(url, error)) {
+            fl_alert("Invalid server URL:\n\n%s", error.c_str());
+            url_input_->take_focus();
+            return false;
+        }
+        url_input_->value(url.c_str());
+        if (url == options_.base_url) {
+            return true;
+        }
+
+        options_.base_url = url;
+        Settings settings;
+        // The default is stored as "no setting", so a launcher update that
+        // changes the default is followed.
+        std::string default_url = IGWL_BASE_URL;
+        if (!normalize_base_url(default_url, error) || url != default_url) {
+            settings.base_url = url;
+        }
+        if (save_settings(context_.settings_file, settings, error)) {
+            log("Saved server URL " + url + " to " + context_.settings_file.u8string());
+        } else {
+            // Not fatal: the URL is still used for this session.
+            log("Could not save the server URL: " + error);
+        }
+        return true;
+    }
+
     void start() {
+        if (!apply_server_url()) {
+            return;
+        }
         running_ = true;
         cancel_ = false;
+        url_input_->deactivate();
         start_button_->deactivate();
         cancel_button_->label("Cancel");
         cancel_button_->activate();
@@ -210,17 +265,22 @@ private:
             fl_alert("Update failed:\n\n%s", result_.error.c_str());
         }
 
+        url_input_->activate();
         start_button_->label("Start");
         start_button_->activate();
         cancel_button_->label("Quit");
         cancel_button_->activate();
     }
 
-    const SyncOptions& options_;
+    // A copy: the server URL changes when the user edits it. The worker
+    // thread only reads it while running, when the field is locked.
+    SyncOptions options_;
+    const GuiContext context_;
     const bool launch_;
 
     Fl_Double_Window* window_;
     Fl_Box* status_;
+    Fl_Input* url_input_;
     Fl_Browser* log_;
     Fl_Progress* current_;
     Fl_Progress* overall_;
@@ -237,7 +297,7 @@ private:
 
 }  // namespace
 
-int run_gui(const SyncOptions& options, bool launch) {
+int run_gui(const SyncOptions& options, const GuiContext& context, bool launch) {
     // Enables FLTK's locking support; the main thread holds the lock from
     // here on, except while Fl::run() waits for events.
     Fl::lock();
@@ -248,7 +308,7 @@ int run_gui(const SyncOptions& options, bool launch) {
 #endif
     Fl::scheme("gtk+");
 
-    LauncherWindow window(options, launch);
+    LauncherWindow window(options, context, launch);
     return window.run();
 }
 

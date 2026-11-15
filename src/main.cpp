@@ -1,6 +1,7 @@
 #include "gui.h"
 #include "http.h"
 #include "platform.h"
+#include "settings.h"
 #include "sync.h"
 
 #include "igwl_config.h"
@@ -38,7 +39,9 @@ const char kUsage[] =
     "  --headless         sync without a window, printing progress to stdout\n"
     "  --no-launch        only sync, do not start the game afterwards\n"
     "  --dir PATH         directory to sync (default: the launcher's directory)\n"
-    "  --base-url URL     server to sync from (default: " IGWL_BASE_URL ")\n"
+    "  --base-url URL     server to sync from, for this run only (default: the\n"
+    "                     one set in the window, saved next to the launcher in\n"
+    "                     igwlegacy-launcher-config.json, else " IGWL_BASE_URL ")\n"
     "  --public-key HEX   Ed25519 key the manifest must be signed with\n"
     "                     (default: the key compiled into this build)\n"
     "  --help             show this text\n";
@@ -93,8 +96,8 @@ int run_headless(const igwl::SyncOptions& options, bool launch) {
 
 int main(int argc, char** argv) {
     igwl::SyncOptions options;
-    options.base_url = IGWL_BASE_URL;
     options.public_key_hex = IGWL_MANIFEST_PUBLIC_KEY;
+    std::string base_url_override;
     bool headless = false;
     bool launch = true;
     bool root_given = false;
@@ -121,7 +124,7 @@ int main(int argc, char** argv) {
             options.root = fs::absolute(fs::path(argv[++i]));
             root_given = true;
         } else if (arg == "--base-url" && has_value) {
-            options.base_url = argv[++i];
+            base_url_override = argv[++i];
         } else if (arg == "--public-key" && has_value) {
             options.public_key_hex = argv[++i];
         } else {
@@ -135,18 +138,43 @@ int main(int argc, char** argv) {
         igwl::platform::attach_parent_console();
     }
 
+    fs::path launcher;
     try {
-        options.launcher = igwl::platform::executable_path();
+        launcher = igwl::platform::executable_path();
     } catch (const std::exception& error) {
         std::cerr << "error: " << error.what() << std::endl;
         return 1;
     }
     // The game lives next to the launcher by default.
     if (!root_given) {
-        options.root = options.launcher.parent_path();
+        options.root = launcher.parent_path();
     }
+
+    // The server: --base-url beats the saved setting, which beats the
+    // compiled-in default. A broken config file only costs the setting.
+    const fs::path settings_file = igwl::settings_path(launcher);
+    igwl::Settings settings;
+    std::string settings_error;
+    if (!igwl::load_settings(settings_file, settings, settings_error)) {
+        settings = igwl::Settings();
+    }
+    options.base_url = settings.base_url.empty() ? IGWL_BASE_URL : settings.base_url;
+    if (!base_url_override.empty()) {
+        options.base_url = base_url_override;
+    }
+    options.protected_files.push_back(launcher);
+    options.protected_files.push_back(settings_file);
 
     igwl::http_global_init();
 
-    return headless ? run_headless(options, launch) : igwl::run_gui(options, launch);
+    if (headless) {
+        if (!settings_error.empty()) {
+            std::cerr << "warning: ignoring settings: " << settings_error << std::endl;
+        }
+        return run_headless(options, launch);
+    }
+    igwl::GuiContext context;
+    context.settings_file = settings_file;
+    context.settings_error = settings_error;
+    return igwl::run_gui(options, context, launch);
 }

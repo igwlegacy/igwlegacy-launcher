@@ -65,7 +65,7 @@ igwlegacy-launcher [--headless] [--no-launch] [--dir PATH]
 
 `--headless` syncs without a window and prints progress, `--no-launch`
 skips starting the game. `--base-url` and `--public-key` override the
-compiled-in values, which is mostly useful for testing.
+configured values for one run, which is mostly useful for testing.
 
 ### Configuration
 
@@ -73,11 +73,28 @@ Two CMake cache variables in `CMakeLists.txt` are compiled into the binary:
 
 | Variable                   | What it is                                           |
 | -------------------------- | ---------------------------------------------------- |
-| `IGWL_BASE_URL`            | Base URL of the published game, ending in `/`        |
+| `IGWL_BASE_URL`            | Default base URL of the published game               |
 | `IGWL_MANIFEST_PUBLIC_KEY` | 64 hex digits, the Ed25519 public key                |
 
 A build without a public key still succeeds (with a configure warning), but
 the launcher then refuses to sync.
+
+The server can be changed in the window's "Server URL" field. When Start is
+pressed with a changed value, it is saved next to the launcher binary in
+`igwlegacy-launcher-config.json`:
+
+```json
+{
+  "base_url": "https://mirror.example.org/igwlegacy/"
+}
+```
+
+Clearing the field returns to the compiled-in default and removes the
+entry. The server is taken from `--base-url`, else from this file, else
+from `IGWL_BASE_URL`. Whatever server is used, the manifest still has to be
+signed with the compiled-in key, so a mirror can serve the game but cannot
+change it. The sync never overwrites or deletes the config file or the
+launcher binary, even if a manifest lists them.
 
 ### Publishing
 
@@ -106,7 +123,8 @@ as `:` or `\`, names differing only in case) are rejected by the launcher.
 * No rollback protection: an attacker who controls the server can serve an
   older, validly signed manifest. Only content signed with the key installs.
 * The launcher does not update itself and must not be listed in the
-  manifest; the running binary is skipped if it is.
+  manifest; the running binary and its config file are skipped if they
+  are.
 * Files are always downloaded whole; there is no delta transfer.
 
 ### Testing
@@ -117,7 +135,8 @@ as `:` or `\`, names differing only in case) are rejected by the launcher.
 
 publishes a small signed test game, serves it on `127.0.0.1` and runs the
 launcher headless against it: download, rerun, repair, removal of dropped
-files, launch, and refusal of tampered manifests and files. CI runs it on
+files, launch, the server URL from the config file, and refusal of
+tampered manifests and files. CI runs it on
 the linux-64 release binary.
 
 ## Quick start
@@ -281,7 +300,7 @@ printed diagnostic. Release builds are unaffected.
 
 | Path                       | What it is                                               |
 | -------------------------- | -------------------------------------------------------- |
-| `src/`                     | The launcher: `gui`, `sync`, `manifest`, `http`, `crypto`, `platform` |
+| `src/`                     | The launcher: `gui`, `sync`, `manifest`, `settings`, `http`, `crypto`, `platform` |
 | `vendor/`                  | The libraries, as git submodules                         |
 | `CMakeLists.txt`           | The project, including configuration and reproducibility flags |
 | `cmake/Vendor.cmake`       | Builds the vendored libraries with pinned options        |

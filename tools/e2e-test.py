@@ -6,13 +6,15 @@
 Publishes a small game with tools/manifest.py, serves it on 127.0.0.1 and runs
 the launcher headless against it: initial download, an up-to-date rerun,
 repair of a locally modified file, removal of a file the manifest dropped,
-the launch step, and refusal of a tampered manifest, a wrong key and a server
-file that does not match its hash.
+the launch step, the server URL saved in igwlegacy-launcher-config.json
+next to the binary, and refusal of a tampered manifest, a wrong key and a
+server file that does not match its hash.
 """
 
 import functools
 import hashlib
 import http.server
+import json
 import os
 import shutil
 import subprocess
@@ -116,6 +118,29 @@ def main():
                 break
             time.sleep(0.1)
         check(code == 0 and (game / "started.txt").is_file(), "game is launched after the sync")
+
+        # Installed like a user would: the launcher inside the game directory,
+        # no --dir and no --base-url, the server coming from its config file.
+        # The manifest also tries to replace that config file, which the
+        # launcher must refuse.
+        installed = work / "installed"
+        installed.mkdir()
+        installed_launcher = installed / launcher.name
+        shutil.copy2(launcher, installed_launcher)
+        config = installed / "igwlegacy-launcher-config.json"
+        config_text = json.dumps({"base_url": base_url, "unrelated": True})
+        config.write_text(config_text)
+        (files / "igwlegacy-launcher-config.json").write_text('{"base_url": "https://evil.invalid/"}')
+        publish_manifest()
+        result = subprocess.run(
+            [str(installed_launcher), "--headless", "--no-launch", "--public-key", public_key],
+            capture_output=True, text=True, timeout=120)
+        check(result.returncode == 0 and (installed / "readme.txt").is_file(),
+              "server URL is taken from igwlegacy-launcher-config.json")
+        check(config.read_text() == config_text and "launcher's own file" in result.stdout,
+              "manifest cannot overwrite the config file")
+        (files / "igwlegacy-launcher-config.json").unlink()
+        publish_manifest()
 
         manifest = publish / "manifest.json"
         original = manifest.read_bytes()

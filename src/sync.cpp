@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -176,11 +177,33 @@ void remove_empty_parents(fs::path directory, const fs::path& root) {
     }
 }
 
-// Whether `file` is the running launcher, which must neither be replaced
-// (impossible while it runs on Windows) nor deleted.
-bool is_launcher(const fs::path& file, const fs::path& launcher) {
+// Spelling-independent form of a path for comparing it lexically: absolute,
+// normalised and, on Windows, whose file systems ignore case, lower-cased
+// (ASCII only, which covers every name the launcher itself uses).
+std::string comparable(const fs::path& file) {
     std::error_code error;
-    return fs::equivalent(file, launcher, error);
+    std::string text = fs::absolute(file, error).lexically_normal().u8string();
+#ifdef _WIN32
+    for (char& c : text) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+#endif
+    return text;
+}
+
+// Whether `file` is one of the launcher's own files, which must neither be
+// replaced (impossible for the running binary on Windows) nor deleted.
+// fs::equivalent catches links and other spellings of existing files, the
+// lexical comparison files that do not exist yet, like a config file that
+// was never saved.
+bool is_protected(const fs::path& file, const std::vector<fs::path>& protected_files) {
+    for (const fs::path& own : protected_files) {
+        std::error_code error;
+        if (fs::equivalent(file, own, error) || comparable(file) == comparable(own)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 class Sync {
@@ -290,8 +313,8 @@ private:
         for (const ManifestFile& file : manifest.files) {
             check_cancel(cancel_);
             const fs::path local = options_.root / fs::path(file.path);
-            if (is_launcher(local, options_.launcher)) {
-                observer_.log("Skipping " + file.path + ": that is the running launcher itself");
+            if (is_protected(local, options_.protected_files)) {
+                observer_.log("Skipping " + file.path + ": that is the launcher's own file");
                 continue;
             }
 
@@ -481,7 +504,7 @@ private:
             }
             const fs::path local = options_.root / fs::path(path);
             std::error_code error;
-            if (!fs::is_regular_file(local, error) || is_launcher(local, options_.launcher)) {
+            if (!fs::is_regular_file(local, error) || is_protected(local, options_.protected_files)) {
                 continue;
             }
             if (fs::remove(local, error)) {

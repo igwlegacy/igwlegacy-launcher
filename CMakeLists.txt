@@ -81,6 +81,7 @@ add_executable(igwlegacy_launcher
     src/main.cpp
     src/manifest.cpp
     src/platform.cpp
+    src/settings.cpp
     src/sync.cpp
 )
 
