@@ -88,8 +88,11 @@ igwl_pin(CURL_DISABLE_INSTALL ON)
 igwl_pin(CURL_ENABLE_EXPORT_TARGET OFF)
 igwl_pin(PICKY_COMPILER OFF)
 # Only HTTP(S) is needed; every other protocol is dead weight and attack
-# surface.
-igwl_pin(HTTP_ONLY ON)
+# surface. curl has no single switch for that (HTTP_ONLY is gone), so each
+# protocol is turned off by name.
+foreach(_igwl_protocol DICT FILE FTP GOPHER IMAP IPFS LDAP LDAPS MQTT POP3 RTSP SMTP TELNET TFTP)
+    igwl_pin(CURL_DISABLE_${_igwl_protocol} ON)
+endforeach()
 igwl_pin(CURL_DISABLE_WEBSOCKETS ON)
 igwl_pin(CURL_DISABLE_ALTSVC ON)
 igwl_pin(CURL_DISABLE_HSTS ON)
@@ -121,8 +124,7 @@ if(WIN32)
     igwl_pin(CURL_USE_SCHANNEL ON)
     igwl_pin(CURL_USE_MBEDTLS OFF)
     igwl_pin(ENABLE_UNICODE ON)
-    # HTTP_ONLY disables the LDAP protocol, yet curl still links wldap32
-    # unless told otherwise.
+    # Belt and braces next to CURL_DISABLE_LDAP: never link wldap32.
     igwl_pin(USE_WIN32_LDAP OFF)
 else()
     igwl_pin(CURL_USE_MBEDTLS ON)
