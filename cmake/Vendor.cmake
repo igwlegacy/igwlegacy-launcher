@@ -2,6 +2,7 @@
 # exposes them as targets:
 #
 #   igwl::fltk        FLTK 1.4 (X11 + Xft on Linux, GDI+ on Windows)
+#   igwl::fltk_images FLTK's image formats, with its bundled libpng and zlib
 #   igwl::curl        static libcurl, HTTP(S) only
 #                     (TLS: Schannel on Windows, mbedTLS on Linux)
 #   igwl::mbedtls     mbedTLS (SHA-256 everywhere, TLS for curl on Linux)
@@ -195,6 +196,12 @@ add_subdirectory("${IGWL_VENDOR_DIR}/fltk" "${CMAKE_BINARY_DIR}/vendor/fltk" EXC
 unset(CMAKE_SKIP_INSTALL_RULES)
 target_compile_options(fltk PRIVATE ${_igwl_quiet})
 add_library(igwl::fltk ALIAS fltk)
+# Fl_PNG_Image for the logo; libpng and zlib come from FLTK's own copies
+# (see FLTK_USE_SYSTEM_LIBPNG / FLTK_USE_SYSTEM_ZLIB above).
+foreach(_igwl_target fltk_images fltk_png fltk_z)
+    target_compile_options(${_igwl_target} PRIVATE ${_igwl_quiet})
+endforeach()
+add_library(igwl::fltk_images ALIAS fltk_images)
 # FLTK adds its own output directory (vendor/fltk/lib) as a link directory
 # for everything linking it. The libraries end up in ${CMAKE_BINARY_DIR}/lib
 # instead, so the directory would never exist and the linker warns about it

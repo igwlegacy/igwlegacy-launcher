@@ -74,6 +74,29 @@ configure_file(src/config.h.in "${CMAKE_BINARY_DIR}/generated/igwl_config.h" @ON
 
 include(cmake/Vendor.cmake)
 
+# --- Embedded assets ---------------------------------------------------------
+#
+# Compiles a file into the executable as igwl::assets::<symbol> (declared in
+# src/assets.h). The array is generated at build time, so changing the file
+# rebuilds it; the output only depends on the file's bytes.
+function(igwl_embed target input symbol)
+    set(output "${CMAKE_BINARY_DIR}/generated/${symbol}.cpp")
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${CMAKE_COMMAND}"
+                "-DINPUT=${CMAKE_SOURCE_DIR}/${input}"
+                "-DOUTPUT=${output}"
+                "-DSYMBOL=${symbol}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+        DEPENDS "${CMAKE_SOURCE_DIR}/${input}" "${CMAKE_SOURCE_DIR}/cmake/EmbedFile.cmake"
+        COMMENT "Embedding ${input}"
+        VERBATIM
+    )
+    target_sources(${target} PRIVATE "${output}")
+endfunction()
+
+# -----------------------------------------------------------------------------
+
 add_executable(igwlegacy_launcher
     src/crypto.cpp
     src/gui.cpp
@@ -108,7 +131,14 @@ target_compile_definitions(igwlegacy_launcher PRIVATE
     IGWL_VERSION="${PROJECT_VERSION}"
 )
 
-target_include_directories(igwlegacy_launcher PRIVATE "${CMAKE_BINARY_DIR}/generated")
+# The generated sources (config header, embedded assets) and src/ for the
+# assets.h the embedded assets include from the build tree.
+target_include_directories(igwlegacy_launcher PRIVATE
+    "${CMAKE_BINARY_DIR}/generated"
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+igwl_embed(igwlegacy_launcher assets/logo_flat.png logo_flat_png)
 
 if(WIN32)
     # WIN32_EXECUTABLE above makes CMake pass -mwindows, which zig accepts
@@ -121,6 +151,7 @@ target_compile_options(igwlegacy_launcher PRIVATE -Wall -Wextra -Wpedantic)
 
 target_link_libraries(igwlegacy_launcher PRIVATE
     igwl::fltk
+    igwl::fltk_images
     igwl::curl
     igwl::mbedtls
     igwl::monocypher

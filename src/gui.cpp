@@ -1,5 +1,6 @@
 #include "gui.h"
 
+#include "assets.h"
 #include "platform.h"
 #include "settings.h"
 
@@ -11,6 +12,7 @@
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Input.H>
 #include <FL/Fl_Menu_Item.H>
+#include <FL/Fl_PNG_Image.H>
 #include <FL/Fl_Progress.H>
 #include <FL/Fl_Return_Button.H>
 #include <FL/Fl_Text_Buffer.H>
@@ -270,6 +272,59 @@ private:
     int anchor_end_;
 };
 
+
+// Clicks on the logo, each within the gap (seconds) of the previous one,
+// that switch from the minimal to the full view.
+const int kSwitchClicks = 4;
+const double kSwitchClickGap = 0.8;
+
+// The logo of the minimal view. Clicking it kSwitchClicks times in a row,
+// each click within kSwitchClickGap seconds of the previous one, runs the
+// widget's callback, which switches to the full view.
+class LogoBox : public Fl_Box {
+public:
+    LogoBox(int x, int y, int w, int h) : Fl_Box(x, y, w, h), clicks_(0) {}
+
+    ~LogoBox() {
+        Fl::remove_timeout(reset_clicks, this);
+    }
+
+    int handle(int event) override {
+        if (event == FL_PUSH && Fl::event_button() == FL_LEFT_MOUSE) {
+            // Every click restarts the gap; when it runs out, counting
+            // starts over.
+            Fl::remove_timeout(reset_clicks, this);
+            if (++clicks_ >= kSwitchClicks) {
+                clicks_ = 0;
+                do_callback();
+            } else {
+                Fl::add_timeout(kSwitchClickGap, reset_clicks, this);
+            }
+            return 1;
+        }
+        return Fl_Box::handle(event);
+    }
+
+private:
+    static void reset_clicks(void* data) {
+        static_cast<LogoBox*>(data)->clicks_ = 0;
+    }
+
+    int clicks_;
+};
+
+// The launcher has two views of the same state, each in its own window:
+//
+// * the minimal view, shown at startup: the logo on the left and to its
+//   right the server URL, Start (Cancel while syncing), one progress bar
+//   for the overall progress and the status text;
+// * the full view, the fallback reached by clicking the logo four times
+//   in a row: additionally the log, a progress bar for the current file
+//   and a separate Quit/Cancel button.
+//
+// Only one of the windows is shown at a time, but both are kept up to date
+// so that switching mid-sync loses nothing.
+//
 // FLTK is not thread-safe. The sync thread only ever touches widgets while
 // holding the global FLTK lock (Fl::lock), which the main thread releases
 // whenever it waits for events, and then wakes the main thread with
@@ -281,14 +336,151 @@ public:
         : options_(options),
           context_(context),
           launch_(launch),
+          logo_image_(nullptr),
+          shown_(nullptr),
           cancel_(false),
           running_(false),
           close_requested_(false),
           exit_code_(0) {
-        window_ = new Fl_Double_Window(600, 415, "IGW Legacy Launcher " IGWL_VERSION);
-        window_->callback(on_close, this);
+        build_minimal_view();
+        build_full_view();
 
-        status_ = new Fl_Box(15, 10, 570, 30, "Press Start to update and launch the game.");
+        log("Game directory: " + options_.root.u8string());
+        if (!context_.settings_error.empty()) {
+            log("Ignoring the saved settings: " + context_.settings_error);
+        }
+    }
+
+    ~LauncherWindow() {
+        delete mini_window_;
+        delete full_window_;
+        // Neither the display nor the box own what they show; free it once
+        // the widgets, which still refer to it, are gone.
+        delete log_buffer_;
+        delete logo_image_;
+    }
+
+    int run() {
+        shown_ = mini_window_;
+        mini_window_->show();
+        Fl::run();
+        return exit_code_;
+    }
+
+    // --- SyncObserver, called on the sync thread --------------------------
+
+    // Only the full view has a log; the minimal one shows the status alone.
+    void log(const std::string& line) override {
+        Fl::lock();
+        // Separate lines with newlines instead of ending each one with it,
+        // so there is no empty line below the last entry.
+        if (log_buffer_->length() > 0) {
+            log_buffer_->append("\n");
+        }
+        log_buffer_->append(line.c_str());
+        // Keep the newest line in view. The insert position is invisible
+        // (no cursor is shown) and independent of the selection.
+        log_->insert_position(log_buffer_->length());
+        log_->show_insert_position();
+        Fl::unlock();
+        Fl::awake();
+    }
+
+    void status(const std::string& text) override {
+        Fl::lock();
+        set_status(text);
+        Fl::unlock();
+        Fl::awake();
+    }
+
+    void progress(double current, double overall) override {
+        Fl::lock();
+        set_progress(current_, current);
+        set_progress(overall_, overall);
+        set_progress(mini_progress_, overall);
+        Fl::unlock();
+        Fl::awake();
+    }
+
+private:
+    // --- Building the views -----------------------------------------------
+
+    // 1024x319: the logo (512x319) fills the left half, the controls are
+    // stacked, vertically centred, in the right one.
+    void build_minimal_view() {
+        // Colours taken from the logo: dark iron, rust, and the red of its
+        // accents.
+        const Fl_Color background = fl_rgb_color(30, 28, 27);
+        const Fl_Color field = fl_rgb_color(48, 45, 43);
+        const Fl_Color text = fl_rgb_color(232, 226, 216);
+        const Fl_Color rust = fl_rgb_color(168, 72, 32);
+        const Fl_Color red = fl_rgb_color(178, 34, 30);
+
+        mini_window_ = new Fl_Double_Window(1024, 319, "IGW Legacy Launcher " IGWL_VERSION);
+        mini_window_->color(background);
+        mini_window_->callback(on_close, this);
+
+        logo_ = new LogoBox(0, 0, 512, 319);
+        logo_->box(FL_NO_BOX);
+        logo_image_ = new Fl_PNG_Image(nullptr, assets::logo_flat_png,
+                                       static_cast<int>(assets::logo_flat_png_size));
+        // A logo that fails to decode costs the picture, not the launcher:
+        // the box stays empty and clicking it still works.
+        if (logo_image_->fail() == 0) {
+            logo_->image(logo_image_);
+        }
+        logo_->callback(on_logo_clicks, this);
+
+        // Right column: 452 pixels wide, 28 from the logo and 32 from the
+        // window's right edge.
+        const int x = 540;
+        const int w = 452;
+
+        mini_url_ = new UrlInput(x, 67, w, 30, "Server URL");
+        mini_url_->align(FL_ALIGN_TOP_LEFT);
+        mini_url_->labelsize(12);
+        mini_url_->labelcolor(text);
+        mini_url_->color(field);
+        mini_url_->textcolor(text);
+        mini_url_->cursor_color(text);
+        mini_url_->selection_color(rust);
+        mini_url_->value(options_.base_url.c_str());
+        mini_url_->tooltip(kUrlTooltip);
+
+        // A plain button with Enter as its shortcut rather than an
+        // Fl_Return_Button, which would draw its return-key glyph on it.
+        mini_start_ = new Fl_Button(x, 113, w, 52, "Start");
+        mini_start_->shortcut(FL_Enter);
+        mini_start_->color(rust);
+        mini_start_->labelcolor(FL_WHITE);
+        mini_start_->labelfont(FL_HELVETICA_BOLD);
+        mini_start_->labelsize(20);
+        mini_start_->callback(on_mini_start, this);
+
+        mini_progress_ = new Fl_Progress(x, 193, w, 24);
+        mini_progress_->minimum(0);
+        mini_progress_->maximum(1);
+        mini_progress_->color(field);
+        mini_progress_->selection_color(red);
+        mini_progress_->labelcolor(FL_WHITE);
+        mini_progress_->labelsize(12);
+
+        // Two lines, so the longer messages wrap instead of being cut off.
+        mini_status_ = new Fl_Box(x, 227, w, 44);
+        mini_status_->align(FL_ALIGN_TOP_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP | FL_ALIGN_CLIP);
+        mini_status_->labelcolor(text);
+        mini_status_->labelsize(14);
+
+        // No resizable widget: the window keeps its size.
+        mini_window_->end();
+    }
+
+    // The original window, kept as the fallback.
+    void build_full_view() {
+        full_window_ = new Fl_Double_Window(600, 415, "IGW Legacy Launcher " IGWL_VERSION);
+        full_window_->callback(on_close, this);
+
+        status_ = new Fl_Box(15, 10, 570, 30);
         status_->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_CLIP);
         status_->labelfont(FL_HELVETICA_BOLD);
 
@@ -296,8 +488,7 @@ public:
         // pressed with a changed value; clearing it restores the default.
         url_input_ = new UrlInput(95, 45, 490, 25, "Server URL:");
         url_input_->value(options_.base_url.c_str());
-        url_input_->tooltip("The address the game files are downloaded from. "
-                            "Leave empty for the default server.");
+        url_input_->tooltip(kUrlTooltip);
 
         // A text display rather than a browser so the log can be selected
         // and copied (mouse, Ctrl+C, right-click menu); unlike
@@ -327,62 +518,21 @@ public:
         start_button_ = new Fl_Return_Button(490, 375, 95, 28, "Start");
         start_button_->callback(on_start, this);
 
-        window_->resizable(log_);
-        window_->end();
+        full_window_->resizable(log_);
+        full_window_->end();
 
-        log("Game directory: " + options_.root.u8string());
-        if (!context_.settings_error.empty()) {
-            log("Ignoring the saved settings: " + context_.settings_error);
-        }
+        set_status("Press Start to update and launch the game.");
     }
 
-    ~LauncherWindow() {
-        delete window_;
-        // The display does not own its buffer; free it once the display,
-        // which still refers to it, is gone.
-        delete log_buffer_;
-    }
+    // --- Shared by both views ---------------------------------------------
 
-    int run() {
-        window_->show();
-        Fl::run();
-        return exit_code_;
-    }
+    static const char kUrlTooltip[];
 
-    // --- SyncObserver, called on the sync thread --------------------------
-
-    void log(const std::string& line) override {
-        Fl::lock();
-        // Separate lines with newlines instead of ending each one with it,
-        // so there is no empty line below the last entry.
-        if (log_buffer_->length() > 0) {
-            log_buffer_->append("\n");
-        }
-        log_buffer_->append(line.c_str());
-        // Keep the newest line in view. The insert position is invisible
-        // (no cursor is shown) and independent of the selection.
-        log_->insert_position(log_buffer_->length());
-        log_->show_insert_position();
-        Fl::unlock();
-        Fl::awake();
-    }
-
-    void status(const std::string& text) override {
-        Fl::lock();
+    void set_status(const std::string& text) {
         status_->copy_label(text.c_str());
-        Fl::unlock();
-        Fl::awake();
+        mini_status_->copy_label(text.c_str());
     }
 
-    void progress(double current, double overall) override {
-        Fl::lock();
-        set_progress(current_, current);
-        set_progress(overall_, overall);
-        Fl::unlock();
-        Fl::awake();
-    }
-
-private:
     static void set_progress(Fl_Progress* bar, double value) {
         bar->value(static_cast<float>(value));
         char text[16];
@@ -393,25 +543,69 @@ private:
         bar->align(FL_ALIGN_CENTER | FL_ALIGN_INSIDE);
     }
 
+    // The server URL field of the view in use.
+    Fl_Input* active_url_input() const {
+        return shown_ == mini_window_ ? mini_url_ : url_input_;
+    }
+
+    // Closes whichever window is shown, which ends Fl::run().
+    void close() {
+        mini_window_->hide();
+        full_window_->hide();
+    }
+
+    void request_cancel() {
+        cancel_ = true;
+        cancel_button_->deactivate();
+        mini_start_->deactivate();
+        set_status("Cancelling...");
+    }
+
     // --- Main thread ------------------------------------------------------
+
+    // Four clicks on the logo: replace the minimal view by the full one at
+    // the same place. A sync in progress carries on and keeps reporting to
+    // the full view.
+    static void on_logo_clicks(Fl_Widget*, void* data) {
+        LauncherWindow* self = static_cast<LauncherWindow*>(data);
+        if (self->shown_ != self->mini_window_) {
+            return;
+        }
+        // Take over what was typed but not yet applied by Start.
+        self->url_input_->value(self->mini_url_->value());
+        self->full_window_->position(self->mini_window_->x(), self->mini_window_->y());
+        // Show the new window before hiding the old one: with no window
+        // shown, Fl::run() would return.
+        self->full_window_->show();
+        self->mini_window_->hide();
+        self->shown_ = self->full_window_;
+    }
 
     static void on_start(Fl_Widget*, void* data) {
         static_cast<LauncherWindow*>(data)->start();
     }
 
-    static void on_cancel(Fl_Widget*, void* data) {
+    // The minimal view's only button: Start, or Cancel while syncing.
+    static void on_mini_start(Fl_Widget*, void* data) {
         LauncherWindow* self = static_cast<LauncherWindow*>(data);
         if (self->running_) {
-            self->cancel_ = true;
-            self->cancel_button_->deactivate();
-            self->status_->copy_label("Cancelling...");
+            self->request_cancel();
         } else {
-            self->window_->hide();
+            self->start();
         }
     }
 
-    // Closing the window while a sync runs only requests cancellation; the
-    // window goes away once the thread has finished (see on_finished).
+    static void on_cancel(Fl_Widget*, void* data) {
+        LauncherWindow* self = static_cast<LauncherWindow*>(data);
+        if (self->running_) {
+            self->request_cancel();
+        } else {
+            self->close();
+        }
+    }
+
+    // Closing a window while a sync runs only requests cancellation; the
+    // window goes away once the thread has finished (see finished()).
     // Hiding it right away would end Fl::run() with the thread still alive.
     static void on_close(Fl_Widget*, void* data) {
         LauncherWindow* self = static_cast<LauncherWindow*>(data);
@@ -419,16 +613,18 @@ private:
         if (self->running_) {
             self->close_requested_ = true;
             self->cancel_ = true;
-            self->status_->copy_label("Cancelling...");
+            self->set_status("Cancelling...");
         } else {
-            self->window_->hide();
+            self->close();
         }
     }
 
-    // Takes over the server URL from the input field, saving it if it was
-    // changed. Returns false (after telling the user) if it is not usable.
+    // Takes over the server URL from the input field of the view in use,
+    // saving it if it was changed. Returns false (after telling the user)
+    // if it is not usable.
     bool apply_server_url() {
-        std::string url = url_input_->value();
+        Fl_Input* input = active_url_input();
+        std::string url = input->value();
         // Empty means the default; spaces only count as empty too.
         const bool use_default = url.find_first_not_of(" \t\r\n") == std::string::npos;
         if (use_default) {
@@ -437,10 +633,12 @@ private:
         std::string error;
         if (!normalize_base_url(url, error)) {
             fl_alert("Invalid server URL:\n\n%s", error.c_str());
-            url_input_->take_focus();
+            input->take_focus();
             return false;
         }
+        // Both views show the URL in use.
         url_input_->value(url.c_str());
+        mini_url_->value(url.c_str());
         if (url == options_.base_url) {
             return true;
         }
@@ -469,11 +667,16 @@ private:
         running_ = true;
         cancel_ = false;
         url_input_->deactivate();
+        mini_url_->deactivate();
         start_button_->deactivate();
         cancel_button_->label("Cancel");
         cancel_button_->activate();
+        // The minimal view has no separate cancel button.
+        mini_start_->label("Cancel");
+        mini_start_->activate();
         set_progress(current_, 0.0);
         set_progress(overall_, 0.0);
+        set_progress(mini_progress_, 0.0);
 
         worker_ = std::thread([this]() {
             result_ = run_sync(options_, *this, cancel_);
@@ -492,49 +695,62 @@ private:
         running_ = false;
 
         if (close_requested_) {
-            window_->hide();
+            close();
             return;
         }
 
         if (result_.ok) {
             if (!launch_ || result_.launch.empty()) {
-                status_->copy_label(result_.launch.empty()
-                                        ? "Up to date. The manifest names no program to start here."
-                                        : "Up to date.");
+                set_status(result_.launch.empty()
+                               ? "Up to date. The manifest names no program to start here."
+                               : "Up to date.");
             } else {
                 std::string error;
                 if (platform::launch(result_.launch, options_.root, error)) {
-                    window_->hide();
+                    close();
                     return;
                 }
                 log(error);
-                status_->copy_label("Up to date, but the game could not be started.");
+                set_status("Up to date, but the game could not be started.");
                 exit_code_ = 1;
             }
         } else if (result_.cancelled) {
             log("Cancelled.");
-            status_->copy_label("Cancelled. Press Start to try again.");
+            set_status("Cancelled. Press Start to try again.");
         } else {
             log("Error: " + result_.error);
-            status_->copy_label("Update failed. Press Start to try again.");
+            set_status("Update failed. Press Start to try again.");
             exit_code_ = 1;
             fl_alert("Update failed:\n\n%s", result_.error.c_str());
         }
 
         url_input_->activate();
+        mini_url_->activate();
         start_button_->label("Start");
         start_button_->activate();
+        mini_start_->label("Start");
+        mini_start_->activate();
         cancel_button_->label("Quit");
         cancel_button_->activate();
     }
 
     // A copy: the server URL changes when the user edits it. The worker
-    // thread only reads it while running, when the field is locked.
+    // thread only reads it while running, when the fields are locked.
     SyncOptions options_;
     const GuiContext context_;
     const bool launch_;
 
-    Fl_Double_Window* window_;
+    // Minimal view.
+    Fl_Double_Window* mini_window_;
+    LogoBox* logo_;
+    Fl_PNG_Image* logo_image_;
+    Fl_Input* mini_url_;
+    Fl_Button* mini_start_;
+    Fl_Progress* mini_progress_;
+    Fl_Box* mini_status_;
+
+    // Full view.
+    Fl_Double_Window* full_window_;
     Fl_Box* status_;
     Fl_Input* url_input_;
     Fl_Text_Buffer* log_buffer_;
@@ -544,6 +760,9 @@ private:
     Fl_Button* cancel_button_;
     Fl_Return_Button* start_button_;
 
+    // The window of the view in use.
+    Fl_Double_Window* shown_;
+
     std::thread worker_;
     std::atomic<bool> cancel_;
     SyncResult result_;
@@ -551,6 +770,9 @@ private:
     bool close_requested_;
     int exit_code_;
 };
+
+const char LauncherWindow::kUrlTooltip[] =
+    "The address the game files are downloaded from. Leave empty for the default server.";
 
 }  // namespace
 

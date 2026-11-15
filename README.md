@@ -56,6 +56,21 @@ the content trustworthy, though: a compromised web server can withhold
 updates but cannot get the launcher to install anything that was not signed
 with the private key.
 
+### The window
+
+The launcher opens a compact 1024x319 window: the logo on the left and,
+to its right, the server URL, Start, a progress bar for the whole sync and
+a status line. While a sync runs, Start turns into Cancel.
+
+Clicking the logo four times in a row switches to the full window for
+troubleshooting, which adds the log (selectable and copyable), a progress
+bar for the current file and a separate Quit/Cancel button. A sync in
+progress carries on across the switch. The full window lasts until the
+launcher is closed; the next start opens the compact one again.
+
+The logo (`assets/logo_flat.png`) is compiled into the binary by
+`cmake/EmbedFile.cmake`, so the launcher stays a single file.
+
 ### Command line
 
 ```
@@ -193,7 +208,7 @@ Linux on the C library and on the X11 libraries every desktop has
 
 | Submodule                    | Used for                                           |
 | ---------------------------- | -------------------------------------------------- |
-| `vendor/fltk`                | The GUI (X11 + Xft on Linux, GDI+ on Windows)      |
+| `vendor/fltk`                | The GUI (X11 + Xft on Linux, GDI+ on Windows), and the logo through its bundled libpng and zlib |
 | `vendor/curl`                | HTTP(S), built static and HTTP-only                |
 | `vendor/mbedtls`             | SHA-256 everywhere, TLS for curl on Linux          |
 | `vendor/monocypher`          | Ed25519 signature verification (RFC 8032)          |
@@ -300,10 +315,12 @@ printed diagnostic. Release builds are unaffected.
 
 | Path                       | What it is                                               |
 | -------------------------- | -------------------------------------------------------- |
-| `src/`                     | The launcher: `gui`, `sync`, `manifest`, `settings`, `http`, `crypto`, `platform` |
+| `src/`                     | The launcher: `gui`, `sync`, `manifest`, `settings`, `http`, `crypto`, `platform`, `assets.h` |
 | `vendor/`                  | The libraries, as git submodules                         |
+| `assets/logo_flat.png`     | The logo shown in the window, embedded at build time     |
 | `CMakeLists.txt`           | The project, including configuration and reproducibility flags |
 | `cmake/Vendor.cmake`       | Builds the vendored libraries with pinned options        |
+| `cmake/EmbedFile.cmake`    | Turns a file into a C++ array (used for the logo)        |
 | `cmake/LinuxSysroot.cmake` | X11 headers and link stubs for the Linux targets         |
 | `cmake/linux-stubs/`       | Symbol lists the link stubs are generated from           |
 | `tools/manifest.py`        | Key generation, manifest building and signing            |

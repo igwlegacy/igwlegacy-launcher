@@ -1,4 +1,6 @@
-// The FLTK window: server URL, log, progress bars, Start and Cancel.
+// The FLTK window: a minimal view with the logo, server URL, Start, a
+// progress bar and the status, and the full view with log and Quit/Cancel
+// as a fallback (four clicks on the logo).
 #ifndef IGWL_GUI_H
 #define IGWL_GUI_H
 
