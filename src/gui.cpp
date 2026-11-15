@@ -7,26 +7,268 @@
 
 #include <FL/Fl.H>
 #include <FL/Fl_Box.H>
-#include <FL/Fl_Browser.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Double_Window.H>
 #include <FL/Fl_Input.H>
+#include <FL/Fl_Menu_Item.H>
 #include <FL/Fl_Progress.H>
 #include <FL/Fl_Return_Button.H>
+#include <FL/Fl_Text_Buffer.H>
+#include <FL/Fl_Text_Display.H>
+#include <FL/fl_draw.H>
 #include <FL/fl_ask.H>
 
 #if defined(__linux__)
 #include <fontconfig/fontconfig.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 
 namespace igwl {
 
 namespace {
+
+// FLTK's right-click handling in text widgets keeps the selection only
+// when the click lands inside it; elsewhere it selects the clicked word,
+// or clears the selection when the click is past the end of a line. So
+// selecting all and right-clicking an empty spot lost the selection
+// before it could be copied. The widgets below therefore show the menu
+// themselves while text is selected and leave the selection alone;
+// without a selection FLTK's default behaviour still applies.
+//
+// They also keep to one visible selection per window, as the X11 primary
+// selection suggests: when the focus moves to another widget of the same
+// window, the widget losing it drops its selection. When the window as a
+// whole loses the focus (switching to another program, a dialog), the
+// focus becomes empty or lies in another window, and the selection stays
+// so it can still be pasted elsewhere.
+
+enum EditAction { kNone, kCut, kCopy, kPaste };
+
+// Pops up the context menu for a selection at the mouse position; Cut
+// and Paste are only offered when the text can be changed.
+EditAction selection_menu(bool editable) {
+    // Three items plus the all-zero terminator FLTK menus end with.
+    Fl_Menu_Item menu[4] = {};
+    menu[0].label(Fl_Input::cut_menu_text);
+    menu[1].label(Fl_Input::copy_menu_text);
+    menu[2].label(Fl_Input::paste_menu_text);
+    if (!editable) {
+        menu[0].deactivate();
+        menu[2].deactivate();
+    }
+    const Fl_Menu_Item* picked = menu[0].popup(Fl::event_x(), Fl::event_y());
+    if (picked == &menu[0]) return kCut;
+    if (picked == &menu[1]) return kCopy;
+    if (picked == &menu[2]) return kPaste;
+    return kNone;
+}
+
+// Whether a widget that just got FL_UNFOCUS lost the focus to another
+// widget of its own window (Fl::focus() already names the new one).
+bool focus_moved_within_window(const Fl_Widget* widget) {
+    const Fl_Widget* focus = Fl::focus();
+    return focus && focus != widget && focus->top_window() == widget->top_window();
+}
+
+// Moves the focus to a widget as its own left-click would, so keyboard
+// shortcuts such as Ctrl+C reach it after a right-click.
+void focus_on_click(Fl_Widget* widget) {
+    if (Fl::focus() != widget) {
+        Fl::focus(widget);
+        widget->handle(FL_FOCUS);
+    }
+}
+
+// The read-only log.
+class LogDisplay : public Fl_Text_Display {
+public:
+    LogDisplay(int x, int y, int w, int h) : Fl_Text_Display(x, y, w, h) {}
+
+    int handle(int event) override {
+        if (event == FL_PUSH && Fl::event_button() == FL_RIGHT_MOUSE && buffer() &&
+            buffer()->selected() &&
+            // Clicks on the scrollbars are left to the default handling.
+            Fl::event_inside(text_area.x, text_area.y, text_area.w, text_area.h)) {
+            focus_on_click(this);
+            if (selection_menu(false) == kCopy) {
+                char* text = buffer()->selection_text();
+                Fl::copy(text, static_cast<int>(std::strlen(text)), 1);
+                std::free(text);
+            }
+            return 1;
+        }
+        if (event == FL_UNFOCUS && buffer() && focus_moved_within_window(this)) {
+            buffer()->unselect();
+        }
+        return Fl_Text_Display::handle(event);
+    }
+};
+
+// The editable server URL field.
+//
+// Fl_Input's double-click selects everything between spaces, which for a
+// URL is the whole text. Like in the log, a double-click selects just
+// the word under the mouse here, and dragging on from it extends the
+// selection word by word; a triple-click still selects all of it.
+//
+// Fl_Input also draws a line with a selection in three pieces (before,
+// inside and after it), each starting at a position FLTK rounds to whole
+// logical pixels before applying the screen scale. With a fractional
+// scale (e.g. Xft.dpi 128, scale 1.33) the pieces then land up to a
+// device pixel away from where they sit in the unbroken text, so the
+// text jumps around while selecting. draw() repaints a selected line as
+// one piece instead.
+class UrlInput : public Fl_Input {
+public:
+    UrlInput(int x, int y, int w, int h, const char* label)
+        : Fl_Input(x, y, w, h, label), anchor_start_(0), anchor_end_(0) {}
+
+    void draw() override {
+        // Always run Fl_Input's drawing first: besides painting, it keeps
+        // the horizontal scroll offset (xscroll()) up to date.
+        Fl_Input::draw();
+        const int start = std::min(insert_position(), mark());
+        const int end = std::max(insert_position(), mark());
+        // Fl_Input shows the selection only while focused or clicked on,
+        // and the repaint below covers plain single-line text only: no
+        // input method composition, no control characters (which
+        // Fl_Input shows as "^X" sequences).
+        if (start == end || (Fl::focus() != this && Fl::pushed() != this) ||
+            Fl::compose_state || input_type() != FL_NORMAL_INPUT) {
+            return;
+        }
+        const char* text = value();
+        for (int i = 0; i < size(); i++) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (c < ' ' || c == 127) return;
+        }
+
+        // The text area and line placement exactly as Fl_Input_::drawtext
+        // computes them for a single line.
+        const Fl_Boxtype b = box();
+        const int X = x() + Fl::box_dx(b);
+        const int Y = y() + Fl::box_dy(b);
+        const int W = w() - Fl::box_dw(b);
+        const int H = h() - Fl::box_dh(b);
+        fl_font(textfont(), textsize());
+        const int height = fl_height();
+        const int top = Y - yscroll();
+        const float baseline = static_cast<float>(top + height - fl_descent());
+        const float xpos = static_cast<float>(X - xscroll() + 1);
+        const int sel_x1 = static_cast<int>(xpos + fl_width(text, start) + 0.5);
+        const int sel_x2 = static_cast<int>(xpos + fl_width(text, end) + 0.5);
+
+        fl_push_clip(X, Y, W, H);
+        // Wipe what Fl_Input drew and draw the whole line in one call, so
+        // every character sits where it does without a selection. The
+        // box is redrawn rather than the area filled: at fractional scales
+        // the area's edges round onto the box's shading.
+        draw_box(b, color());
+        fl_color(active_r() ? textcolor() : fl_inactive(textcolor()));
+        fl_draw(text, size(), xpos, baseline);
+        // Then the selection: its background, and the same line drawn
+        // again at the same position in the contrasting colour, clipped
+        // to the selection.
+        fl_color(selection_color());
+        fl_rectf(sel_x1, top, sel_x2 - sel_x1, height);
+        fl_push_clip(sel_x1, top, sel_x2 - sel_x1, height);
+        fl_color(fl_contrast(textcolor(), selection_color()));
+        fl_draw(text, size(), xpos, baseline);
+        fl_pop_clip();
+        fl_pop_clip();
+    }
+
+    int handle(int event) override {
+        // Fl::event_clicks() is 1 for the second click of a double-click
+        // and stays so while the button is held for dragging.
+        if ((event == FL_PUSH || event == FL_DRAG) && Fl::event_button() == FL_LEFT_MOUSE &&
+            Fl::event_clicks() == 1 && input_type() != FL_SECRET_INPUT) {
+            // Let Fl_Input handle it as a plain click or drag, which puts
+            // the cursor under the mouse (and takes the focus), then widen
+            // the selection to whole words.
+            Fl::event_clicks(0);
+            const int result = Fl_Input::handle(event);
+            // Restored so the release still copies the selection to the
+            // primary selection and a third click counts as a triple-click.
+            Fl::event_clicks(1);
+            const int pos = insert_position();
+            if (event == FL_PUSH) {
+                anchor_start_ = log_word_start(pos);
+                anchor_end_ = log_word_end(pos);
+                if (anchor_start_ == anchor_end_ && pos < size()) {
+                    // Between two separators: select the one to the right.
+                    anchor_end_ = pos + 1;
+                }
+                insert_position(anchor_end_, anchor_start_);
+            } else if (pos >= anchor_end_) {
+                insert_position(log_word_end(pos), anchor_start_);
+            } else if (pos < anchor_start_) {
+                insert_position(log_word_start(pos), anchor_end_);
+            } else {
+                insert_position(anchor_end_, anchor_start_);
+            }
+            return result;
+        }
+        if (event == FL_PUSH && Fl::event_button() == FL_RIGHT_MOUSE &&
+            insert_position() != mark()) {
+            focus_on_click(this);
+            switch (selection_menu(!readonly())) {
+            case kCut:
+                // Like Ctrl+X: copy, then delete the selection.
+                copy(1);
+                cut();
+                break;
+            case kCopy:
+                copy(1);
+                break;
+            case kPaste:
+                // Replaces the selection once the text arrives (FL_PASTE).
+                Fl::paste(*this, 1);
+                break;
+            case kNone:
+                break;
+            }
+            return 1;
+        }
+        if (event == FL_UNFOCUS && focus_moved_within_window(this)) {
+            // Collapse the selection onto the cursor.
+            insert_position(insert_position());
+        }
+        return Fl_Input::handle(event);
+    }
+
+private:
+    // Word characters as in the log (Fl_Text_Buffer::is_word_separator):
+    // ASCII letters, digits and '_'. Bytes of multi-byte UTF-8 characters
+    // count as word characters, so a word never ends inside one.
+    bool is_word_char(int i) const {
+        const unsigned char c = static_cast<unsigned char>(index(i));
+        return c >= 128 || std::isalnum(c) || c == '_';
+    }
+
+    // Start and end of the word touching cursor position pos, or pos itself
+    // if there is no word character on that side.
+    int log_word_start(int pos) const {
+        while (pos > 0 && is_word_char(pos - 1)) pos--;
+        return pos;
+    }
+    int log_word_end(int pos) const {
+        while (pos < size() && is_word_char(pos)) pos++;
+        return pos;
+    }
+
+    // The word picked by the double-click, kept while dragging on from it.
+    int anchor_start_;
+    int anchor_end_;
+};
 
 // FLTK is not thread-safe. The sync thread only ever touches widgets while
 // holding the global FLTK lock (Fl::lock), which the main thread releases
@@ -52,12 +294,17 @@ public:
 
         // Where to sync from. Saved next to the launcher when Start is
         // pressed with a changed value; clearing it restores the default.
-        url_input_ = new Fl_Input(95, 45, 490, 25, "Server URL:");
+        url_input_ = new UrlInput(95, 45, 490, 25, "Server URL:");
         url_input_->value(options_.base_url.c_str());
         url_input_->tooltip("The address the game files are downloaded from. "
                             "Leave empty for the default server.");
 
-        log_ = new Fl_Browser(15, 80, 570, 200);
+        // A text display rather than a browser so the log can be selected
+        // and copied (mouse, Ctrl+C, right-click menu); unlike
+        // Fl_Text_Editor it offers no way to change the text.
+        log_buffer_ = new Fl_Text_Buffer();
+        log_ = new LogDisplay(15, 80, 570, 200);
+        log_->buffer(log_buffer_);
         log_->textsize(12);
 
         current_ = new Fl_Progress(15, 300, 570, 20, "Current file");
@@ -91,6 +338,9 @@ public:
 
     ~LauncherWindow() {
         delete window_;
+        // The display does not own its buffer; free it once the display,
+        // which still refers to it, is gone.
+        delete log_buffer_;
     }
 
     int run() {
@@ -103,10 +353,16 @@ public:
 
     void log(const std::string& line) override {
         Fl::lock();
-        // '@' starts a formatting code in Fl_Browser lines; "@." ends the
-        // codes, so the text is shown verbatim.
-        log_->add(("@." + line).c_str());
-        log_->bottomline(log_->size());
+        // Separate lines with newlines instead of ending each one with it,
+        // so there is no empty line below the last entry.
+        if (log_buffer_->length() > 0) {
+            log_buffer_->append("\n");
+        }
+        log_buffer_->append(line.c_str());
+        // Keep the newest line in view. The insert position is invisible
+        // (no cursor is shown) and independent of the selection.
+        log_->insert_position(log_buffer_->length());
+        log_->show_insert_position();
         Fl::unlock();
         Fl::awake();
     }
@@ -281,7 +537,8 @@ private:
     Fl_Double_Window* window_;
     Fl_Box* status_;
     Fl_Input* url_input_;
-    Fl_Browser* log_;
+    Fl_Text_Buffer* log_buffer_;
+    Fl_Text_Display* log_;
     Fl_Progress* current_;
     Fl_Progress* overall_;
     Fl_Button* cancel_button_;
