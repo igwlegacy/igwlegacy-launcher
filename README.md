@@ -92,8 +92,10 @@ The logo (`assets/logo_flat.png`) is compiled into the binary by
 `cmake/EmbedFile.cmake`, so the launcher stays a single file.
 
 The Windows executables carry `assets/logo.ico` as their icon, through the
-resource script `src/icon.rc`. The `.ico` is generated from
-`assets/logo.png`; the command to regenerate it is in `src/icon.rc`.
+resource script `src/icon.rc`. The launcher loads the same resource again
+for its windows and dialogs, so their title bars and taskbar buttons show it
+too. The `.ico` is generated from `assets/logo.png`; the command to
+regenerate it is in `src/icon.rc`.
 
 ### Command line
 

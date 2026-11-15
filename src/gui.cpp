@@ -23,6 +23,13 @@
 
 #if defined(__linux__)
 #include <fontconfig/fontconfig.h>
+#elif defined(_WIN32)
+// NOMINMAX keeps the min/max macros from breaking std::min/std::max.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include "resource.h"
 #endif
 
 #include <algorithm>
@@ -321,6 +328,34 @@ void apply_theme(const Theme& theme) {
     icon->color(theme.field);
     icon->labelcolor(theme.progress);
 }
+
+#if defined(_WIN32)
+// Makes the executable's own icon (src/icon.rc) the one of every window
+// FLTK creates from now on, the dialogs included; without it they show
+// Windows' generic application icon in the title bar and the taskbar. Has
+// to run before any window is created.
+void set_window_icons() {
+    const HINSTANCE instance = GetModuleHandleW(NULL);
+    // Loaded at exactly the sizes Windows draws them at, so it picks the
+    // closest image of the .ico instead of scaling the default 32x32 one.
+    const auto load = [instance](int size_metric) {
+        const int size = GetSystemMetrics(size_metric);
+        return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IGWL_ICON_ID),
+                                             IMAGE_ICON, size, size, LR_DEFAULTCOLOR));
+    };
+    HICON big_icon = load(SM_CXICON);
+    HICON small_icon = load(SM_CXSMICON);
+    // FLTK copies the icons. A missing one (NULL) leaves Windows' default in
+    // its place, which is not worth failing the launcher over.
+    Fl_Window::default_icons(big_icon, small_icon);
+    if (big_icon != NULL) {
+        DestroyIcon(big_icon);
+    }
+    if (small_icon != NULL) {
+        DestroyIcon(small_icon);
+    }
+}
+#endif
 
 // Gives a Start button the accent colour.
 void style_start_button(Fl_Button* button, const Theme& theme) {
@@ -825,6 +860,8 @@ int run_gui(const SyncOptions& options, const GuiContext& context, bool launch) 
     // FLTK's Xft text drawing uses fontconfig without initialising it, which
     // recent fontconfig releases complain about on stderr at startup.
     FcInit();
+#elif defined(_WIN32)
+    set_window_icons();
 #endif
     Fl::scheme("gtk+");
     const Theme theme = launcher_theme();
