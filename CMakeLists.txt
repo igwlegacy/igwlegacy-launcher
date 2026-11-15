@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 # C is needed for the vendored libraries (curl, mbedTLS, Monocypher).
-project(igwlegacy_launcher VERSION 0.2.0 LANGUAGES C CXX)
+project(igwlegacy_launcher VERSION 0.3.0 LANGUAGES C CXX)
 
 # Single-config generators default to an unoptimised, undefined build type.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
