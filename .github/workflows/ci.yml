@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish-release:
+        description: >-
+          Publish the build as GitHub release v<version>, with the version
+          taken from project() in CMakeLists.txt
+        type: boolean
+        default: false
+
+# Never run two releases at once; plain CI runs of an outdated commit on the
+# same ref are superseded by the newer one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.publish-release && 'release' || 'build' }}
+  cancel-in-progress: ${{ !inputs.publish-release }}
+
+env:
+  # Every file `./dev.py dist` is expected to produce. Spelled out explicitly
+  # so that a missing or unexpected artifact fails the run instead of a
+  # release silently shipping with fewer files.
+  DIST_FILES: >-
+    igwlegacy-launcher-linux-32
+    igwlegacy-launcher-linux-64
+    igwlegacy-launcher-win-32.exe
+    igwlegacy-launcher-win-64.exe
+    SHA256SUMS
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      # Only needed to create the release; the build steps never push.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Resolve the version and make sure the release does not exist yet
+      # before spending time on the build.
+      - name: Determine release version
+        if: inputs.publish-release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -nE 's/^project\([^)]*VERSION ([0-9][0-9.]*).*$/\1/p' CMakeLists.txt)
+          if [ -z "$version" ]; then
+            echo "::error::could not read the project version from CMakeLists.txt"
+            exit 1
+          fi
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1 \
+             || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+            echo "::error::release or tag $tag already exists, bump the version in CMakeLists.txt"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # Installs the exact toolchain from pixi.lock; dev.py re-executes itself
+      # through `pixi run --locked`, so the pixi binary on PATH is all it needs.
+      - uses: prefix-dev/setup-pixi@v0.11.3
+        with:
+          pixi-version: v0.84.2
+          locked: true
+          cache: true
+
+      # `repro` runs `dist` and then rebuilds everything independently from a
+      # different path with cold caches, so whatever gets published has also
+      # been verified to be bit-for-bit reproducible.
+      - name: Build and verify reproducibility
+        run: ./dev.py repro
+
+      - name: Verify artifacts
+        working-directory: dist
+        run: |
+          # Exactly the expected files, nothing missing and nothing extra.
+          read -r -a files <<< "$DIST_FILES"
+          expected=$(printf '%s\n' "${files[@]}" | sort)
+          actual=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::dist/ does not match the expected file list"
+            diff <(echo "$expected") <(echo "$actual") || true
+            exit 1
+          fi
+          sha256sum --strict -c SHA256SUMS
+
+      # The host binary is the only one runnable on the runner without extra
+      # multilib packages or wine; a quick run catches a broken link step.
+      - name: Smoke test linux-64 binary
+        run: ./dist/igwlegacy-launcher-linux-64 | grep -E '^igwlegacy-launcher [0-9]'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: igwlegacy-launcher-${{ github.sha }}
+          path: |
+            dist/igwlegacy-launcher-linux-32
+            dist/igwlegacy-launcher-linux-64
+            dist/igwlegacy-launcher-win-32.exe
+            dist/igwlegacy-launcher-win-64.exe
+            dist/SHA256SUMS
+          if-no-files-found: error
+
+      # Created as a draft first, so the release only becomes visible once
+      # every asset is uploaded and checked. On any failure the draft is
+      # deleted again; drafts do not create the tag, so nothing is left behind.
+      - name: Publish GitHub release
+        if: inputs.publish-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        working-directory: dist
+        run: |
+          read -r -a files <<< "$DIST_FILES"
+
+          # shellcheck disable=SC2016 # the backticks are a markdown code fence
+          notes=$(printf 'Built from %s.\n\nSHA256 checksums:\n\n```\n%s\n```\n' \
+                  "$GITHUB_SHA" "$(cat SHA256SUMS)")
+
+          # Set before the create, as a failed asset upload can leave a
+          # half-filled draft behind; if no draft exists the delete is a no-op.
+          trap 'echo "::error::publishing failed, deleting draft $TAG"; gh release delete "$TAG" --yes || true' ERR
+
+          gh release create "$TAG" --draft --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$notes" "${files[@]}"
+
+          # Every expected asset has to be on the draft before it goes public.
+          expected=$(printf '%s\n' "${files[@]}" | sort)
+          uploaded=$(gh release view "$TAG" --json assets --jq '.assets[].name' | sort)
+          if [ "$expected" != "$uploaded" ]; then
+            echo "::error::uploaded assets do not match the expected file list"
+            diff <(echo "$expected") <(echo "$uploaded") || true
+            false
+          fi
+
+          gh release edit "$TAG" --draft=false
