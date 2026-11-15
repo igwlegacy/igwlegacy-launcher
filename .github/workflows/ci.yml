@@ -24,10 +24,10 @@ env:
   # so that a missing or unexpected artifact fails the run instead of a
   # release silently shipping with fewer files.
   DIST_FILES: >-
-    igwlegacy-launcher-linux-32
-    igwlegacy-launcher-linux-64
-    igwlegacy-launcher-win-32.exe
-    igwlegacy-launcher-win-64.exe
+    igwlegacy-launcher-32bit
+    igwlegacy-launcher
+    igwlegacy-launcher-32bit.exe
+    igwlegacy-launcher.exe
     SHA256SUMS
 
 jobs:
@@ -104,21 +104,21 @@ jobs:
       # multilib packages or wine; a quick run catches a broken link step.
       # Without --version it would try to open its window.
       - name: Smoke test linux-64 binary
-        run: ./dist/igwlegacy-launcher-linux-64 --version | grep -E '^igwlegacy-launcher [0-9]'
+        run: ./dist/igwlegacy-launcher --version | grep -E '^igwlegacy-launcher [0-9]'
 
       # Syncs a freshly signed test game from a local HTTP server, including
       # the tampering cases that must be refused.
       - name: End-to-end test linux-64 binary
-        run: python3 -I tools/e2e-test.py dist/igwlegacy-launcher-linux-64
+        run: python3 -I tools/e2e-test.py dist/igwlegacy-launcher
 
       - uses: actions/upload-artifact@v7
         with:
           name: igwlegacy-launcher-${{ github.sha }}
           path: |
-            dist/igwlegacy-launcher-linux-32
-            dist/igwlegacy-launcher-linux-64
-            dist/igwlegacy-launcher-win-32.exe
-            dist/igwlegacy-launcher-win-64.exe
+            dist/igwlegacy-launcher-32bit
+            dist/igwlegacy-launcher
+            dist/igwlegacy-launcher-32bit.exe
+            dist/igwlegacy-launcher.exe
             dist/SHA256SUMS
           if-no-files-found: error
 

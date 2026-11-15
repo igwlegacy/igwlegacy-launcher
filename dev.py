@@ -118,6 +118,18 @@ def executable_name(target):
     return PROGRAM + suffix
 
 
+def dist_name(target):
+    """The file name a platform's executable is published under in ./dist.
+
+    The 64 bit builds are the default download and keep the plain program
+    name, only the 32 bit ones are told apart by a suffix. Linux and Windows
+    builds already differ by the .exe extension.
+    """
+    stem = PROGRAM + ("-32bit" if target.endswith("-32") else "")
+    suffix = ".exe" if PLATFORMS[target]["system"] == "Windows" else ""
+    return stem + suffix
+
+
 def build_one(target, config, jobs=None, clean=False):
     """Configure, build and install a single target platform."""
     output = build_dir(target, config)
@@ -252,14 +264,19 @@ def command_dist(args):
     shutil.rmtree(DIST_DIR, ignore_errors=True)
     DIST_DIR.mkdir(parents=True)
 
+    # Two platforms published under the same name would silently overwrite
+    # each other's artifact.
+    names = [dist_name(target) for target in targets]
+    if len(set(names)) != len(names):
+        sys.exit(f"dev.py: platforms map to clashing dist names: {', '.join(names)}")
+
     print(f"\ncollecting into {DIST_DIR}", flush=True)
     lines = []
     for target in targets:
         source = install_dir(target, "Release") / "bin" / executable_name(target)
         if not source.is_file():
             sys.exit(f"dev.py: {source} was not installed")
-        stem, dot, suffix = source.name.partition(".")
-        destination = DIST_DIR / f"{stem}-{target}{dot}{suffix}"
+        destination = DIST_DIR / dist_name(target)
         shutil.copy2(source, destination)
         lines.append(f"{sha256(destination)}  {destination.name}")
 

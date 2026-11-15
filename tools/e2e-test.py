@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test of a launcher binary against a local HTTP server.
 
-    ./tools/e2e-test.py dist/igwlegacy-launcher-linux-64
+    ./tools/e2e-test.py dist/igwlegacy-launcher
 
 Publishes a small game with tools/manifest.py, using a small chunk size so
 that some files are published as a single chunk and others split into
