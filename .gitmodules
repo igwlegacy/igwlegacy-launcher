@@ -1,0 +1,48 @@
+[submodule "vendor/fltk"]
+	path = vendor/fltk
+	url = https://github.com/fltk/fltk.git
+	shallow = true
+[submodule "vendor/curl"]
+	path = vendor/curl
+	url = https://github.com/curl/curl.git
+	shallow = true
+[submodule "vendor/mbedtls"]
+	path = vendor/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+	shallow = true
+[submodule "vendor/json"]
+	path = vendor/json
+	url = https://github.com/nlohmann/json.git
+	shallow = true
+[submodule "vendor/filesystem"]
+	path = vendor/filesystem
+	url = https://github.com/gulrak/filesystem.git
+	shallow = true
+[submodule "vendor/monocypher"]
+	path = vendor/monocypher
+	url = https://github.com/LoupVaillant/Monocypher.git
+	shallow = true
+[submodule "vendor/xorgproto"]
+	path = vendor/xorgproto
+	url = https://gitlab.freedesktop.org/xorg/proto/xorgproto.git
+	shallow = true
+[submodule "vendor/libx11"]
+	path = vendor/libx11
+	url = https://gitlab.freedesktop.org/xorg/lib/libx11.git
+	shallow = true
+[submodule "vendor/libxrender"]
+	path = vendor/libxrender
+	url = https://gitlab.freedesktop.org/xorg/lib/libxrender.git
+	shallow = true
+[submodule "vendor/libxft"]
+	path = vendor/libxft
+	url = https://gitlab.freedesktop.org/xorg/lib/libxft.git
+	shallow = true
+[submodule "vendor/fontconfig"]
+	path = vendor/fontconfig
+	url = https://gitlab.freedesktop.org/fontconfig/fontconfig.git
+	shallow = true
+[submodule "vendor/freetype"]
+	path = vendor/freetype
+	url = https://gitlab.freedesktop.org/freetype/freetype.git
+	shallow = true
