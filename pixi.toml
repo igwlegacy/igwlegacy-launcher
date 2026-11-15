@@ -1,0 +1,19 @@
+[workspace]
+channels = ["conda-forge"]
+name = "igwlegacy-launcher"
+# Builds run on Linux only; Windows binaries are cross compiled from there.
+platforms = ["linux-64", "linux-aarch64"]
+version = "0.1.0"
+
+[tasks]
+dev = { cmd = ["python", "./dev.py"] }
+
+# The compiler is pinned to an exact release rather than a range: a different
+# zig produces different bytes, and bit-identical output across machines is the
+# point of this setup. cmake/targets.json records the same version and the
+# toolchain file refuses to configure with any other one.
+[dependencies]
+cmake = "4.4.3.*"
+ninja = "1.13.2.*"
+python = "3.14.*"
+zig = "0.17.0.*"
