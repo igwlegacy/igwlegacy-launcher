@@ -161,7 +161,10 @@ def build_one(target, config, jobs=None, clean=False):
     # A fresh install tree every time, so that nothing a previous build
     # installed can linger and end up in dist.
     shutil.rmtree(install_dir(target, config), ignore_errors=True)
-    run(["cmake", "--install", output, "--prefix", install_dir(target, config)])
+    # Only the launcher itself: the vendored libraries bring install rules for
+    # their headers and static libraries, which have no place in a release.
+    run(["cmake", "--install", output, "--prefix", install_dir(target, config),
+         "--component", "launcher"])
 
 
 def resolve_targets(args):

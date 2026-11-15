@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(igwlegacy_launcher VERSION 0.1.0 LANGUAGES CXX)
+# C is needed for the vendored libraries (curl, mbedTLS, Monocypher).
+project(igwlegacy_launcher VERSION 0.1.0 LANGUAGES C CXX)
 
 # Single-config generators default to an unoptimised, undefined build type.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -41,8 +42,46 @@ add_link_options("$<$<CONFIG:Release,MinSizeRel>:-s>")
 
 # -----------------------------------------------------------------------------
 
+# --- Launcher configuration --------------------------------------------------
+#
+# Compiled into the binary. Change the defaults here (dev.py does not pass
+# any -D options) or override them on a plain cmake command line.
+
+set(IGWL_BASE_URL "https://example.invalid/igwlegacy/" CACHE STRING
+    "Base URL the game files are synced from; manifest.json, manifest.json.sig \
+and files/ are expected below it")
+
+# Hex encoded Ed25519 public key that manifest.json.sig must verify against.
+# `tools/manifest.py keygen` creates a key pair and prints this value.
+set(IGWL_MANIFEST_PUBLIC_KEY "" CACHE STRING
+    "Hex encoded Ed25519 public key for verifying manifest.json")
+
+string(LENGTH "${IGWL_MANIFEST_PUBLIC_KEY}" _igwl_key_length)
+if(NOT IGWL_MANIFEST_PUBLIC_KEY MATCHES "^[0-9a-fA-F]*$"
+   OR NOT (_igwl_key_length EQUAL 0 OR _igwl_key_length EQUAL 64))
+    message(FATAL_ERROR "IGWL_MANIFEST_PUBLIC_KEY must be 64 hex digits (32 bytes)")
+endif()
+if(IGWL_MANIFEST_PUBLIC_KEY STREQUAL "")
+    # Builds still succeed so CI keeps working before a key exists, but such
+    # a launcher refuses to sync (it cannot verify anything) and says why.
+    message(WARNING "IGWL_MANIFEST_PUBLIC_KEY is not set; the launcher will refuse "
+                    "to sync. Run `tools/manifest.py keygen` and set it in CMakeLists.txt.")
+endif()
+
+configure_file(src/config.h.in "${CMAKE_BINARY_DIR}/generated/igwl_config.h" @ONLY)
+
+# -----------------------------------------------------------------------------
+
+include(cmake/Vendor.cmake)
+
 add_executable(igwlegacy_launcher
+    src/crypto.cpp
+    src/gui.cpp
+    src/http.cpp
     src/main.cpp
+    src/manifest.cpp
+    src/platform.cpp
+    src/sync.cpp
 )
 
 set_target_properties(igwlegacy_launcher PROPERTIES
@@ -53,6 +92,13 @@ set_target_properties(igwlegacy_launcher PROPERTIES
     CXX_STANDARD 11
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
+    # A GUI application on Windows: no console window pops up next to it.
+    WIN32_EXECUTABLE ON
+    # On Linux the X11 libraries are linked through stubs in the build tree
+    # (see cmake/LinuxSysroot.cmake). A build tree RPATH pointing there would
+    # embed an absolute path of the build machine, and the system libraries
+    # are what has to be loaded anyway.
+    SKIP_BUILD_RPATH ON
 )
 
 # The version comes from project() above, so it is part of the sources and
@@ -61,6 +107,27 @@ target_compile_definitions(igwlegacy_launcher PRIVATE
     IGWL_VERSION="${PROJECT_VERSION}"
 )
 
+target_include_directories(igwlegacy_launcher PRIVATE "${CMAKE_BINARY_DIR}/generated")
+
+if(WIN32)
+    # WIN32_EXECUTABLE above makes CMake pass -mwindows, which zig accepts
+    # but ignores, producing a console program that opens a terminal window
+    # next to the launcher. Telling the linker directly works.
+    target_link_options(igwlegacy_launcher PRIVATE "LINKER:--subsystem,windows")
+endif()
+
 target_compile_options(igwlegacy_launcher PRIVATE -Wall -Wextra -Wpedantic)
 
-install(TARGETS igwlegacy_launcher RUNTIME DESTINATION bin)
+target_link_libraries(igwlegacy_launcher PRIVATE
+    igwl::fltk
+    igwl::curl
+    igwl::mbedtls
+    igwl::monocypher
+    igwl::json
+    igwl::filesystem
+)
+
+# The vendored libraries come with install rules of their own (headers,
+# static libraries, CMake package files), none of which belong in a release.
+# Only the `launcher` component is installed by dev.py.
+install(TARGETS igwlegacy_launcher RUNTIME DESTINATION bin COMPONENT launcher)
