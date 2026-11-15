@@ -68,6 +68,9 @@ bar for the current file and a separate Quit/Cancel button. A sync in
 progress carries on across the switch. The full window lasts until the
 launcher is closed; the next start opens the compact one again.
 
+Both windows, as well as dialogs such as the one reporting a failed
+update, use the colours of the logo (`Theme` in `src/gui.cpp`).
+
 The logo (`assets/logo_flat.png`) is compiled into the binary by
 `cmake/EmbedFile.cmake`, so the launcher stays a single file.
 

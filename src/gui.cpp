@@ -17,6 +17,7 @@
 #include <FL/Fl_Return_Button.H>
 #include <FL/Fl_Text_Buffer.H>
 #include <FL/Fl_Text_Display.H>
+#include <FL/Fl_Tooltip.H>
 #include <FL/fl_draw.H>
 #include <FL/fl_ask.H>
 
@@ -273,6 +274,61 @@ private:
 };
 
 
+// The launcher's colours, taken from the logo: dark iron, rust, and the
+// red of its accents.
+struct Theme {
+    Fl_Color background;   // windows, dialogs, plain buttons, menus
+    Fl_Color field;        // input fields, the log, empty progress bars
+    Fl_Color text;         // labels and text on the colours above
+    Fl_Color accent;       // the Start buttons, selected text
+    Fl_Color accent_text;  // labels on the accent colour
+    Fl_Color progress;     // the filled part of the overall progress bars
+};
+
+// fl_rgb_color() is not constexpr in C++11, hence a function instead of a
+// constant.
+Theme launcher_theme() {
+    Theme theme;
+    theme.background = fl_rgb_color(30, 28, 27);
+    theme.field = fl_rgb_color(48, 45, 43);
+    theme.text = fl_rgb_color(232, 226, 216);
+    theme.accent = fl_rgb_color(168, 72, 32);
+    theme.accent_text = FL_WHITE;
+    theme.progress = fl_rgb_color(178, 34, 30);
+    return theme;
+}
+
+// Makes the theme FLTK's default colours, so that every widget, including
+// the ones FLTK creates itself (fl_alert() dialogs, right-click menus,
+// tooltips), uses it unless it sets a colour of its own. Has to run before
+// any window is created; the accents are applied per widget.
+void apply_theme(const Theme& theme) {
+    uchar r, g, b;
+    Fl::get_color(theme.background, r, g, b);
+    Fl::background(r, g, b);
+    Fl::get_color(theme.field, r, g, b);
+    Fl::background2(r, g, b);
+    Fl::get_color(theme.text, r, g, b);
+    Fl::foreground(r, g, b);
+    Fl::set_color(FL_SELECTION_COLOR, theme.accent);
+
+    Fl_Tooltip::color(theme.field);
+    Fl_Tooltip::textcolor(theme.text);
+
+    // The icon of fl_alert() and friends is copied from this template;
+    // FLTK's default is a blue sign on white.
+    Fl_Widget* icon = fl_message_icon();
+    icon->color(theme.field);
+    icon->labelcolor(theme.progress);
+}
+
+// Gives a Start button the accent colour.
+void style_start_button(Fl_Button* button, const Theme& theme) {
+    button->color(theme.accent);
+    button->labelcolor(theme.accent_text);
+    button->labelfont(FL_HELVETICA_BOLD);
+}
+
 // Clicks on the logo, each within the gap (seconds) of the previous one,
 // that switch from the minimal to the full view.
 const int kSwitchClicks = 4;
@@ -332,7 +388,9 @@ private:
 // starting and joining the thread) happens on the main thread.
 class LauncherWindow : public SyncObserver {
 public:
-    LauncherWindow(const SyncOptions& options, const GuiContext& context, bool launch)
+    // The theme has to be applied (apply_theme()) beforehand.
+    LauncherWindow(const SyncOptions& options, const GuiContext& context, bool launch,
+                   const Theme& theme)
         : options_(options),
           context_(context),
           launch_(launch),
@@ -342,8 +400,8 @@ public:
           running_(false),
           close_requested_(false),
           exit_code_(0) {
-        build_minimal_view();
-        build_full_view();
+        build_minimal_view(theme);
+        build_full_view(theme);
 
         log("Game directory: " + options_.root.u8string());
         if (!context_.settings_error.empty()) {
@@ -407,17 +465,8 @@ private:
 
     // 1024x319: the logo (512x319) fills the left half, the controls are
     // stacked, vertically centred, in the right one.
-    void build_minimal_view() {
-        // Colours taken from the logo: dark iron, rust, and the red of its
-        // accents.
-        const Fl_Color background = fl_rgb_color(30, 28, 27);
-        const Fl_Color field = fl_rgb_color(48, 45, 43);
-        const Fl_Color text = fl_rgb_color(232, 226, 216);
-        const Fl_Color rust = fl_rgb_color(168, 72, 32);
-        const Fl_Color red = fl_rgb_color(178, 34, 30);
-
+    void build_minimal_view(const Theme& theme) {
         mini_window_ = new Fl_Double_Window(1024, 319, "IGW Legacy Launcher " IGWL_VERSION);
-        mini_window_->color(background);
         mini_window_->callback(on_close, this);
 
         logo_ = new LogoBox(0, 0, 512, 319);
@@ -439,11 +488,6 @@ private:
         mini_url_ = new UrlInput(x, 67, w, 30, "Server URL");
         mini_url_->align(FL_ALIGN_TOP_LEFT);
         mini_url_->labelsize(12);
-        mini_url_->labelcolor(text);
-        mini_url_->color(field);
-        mini_url_->textcolor(text);
-        mini_url_->cursor_color(text);
-        mini_url_->selection_color(rust);
         mini_url_->value(options_.base_url.c_str());
         mini_url_->tooltip(kUrlTooltip);
 
@@ -451,24 +495,19 @@ private:
         // Fl_Return_Button, which would draw its return-key glyph on it.
         mini_start_ = new Fl_Button(x, 113, w, 52, "Start");
         mini_start_->shortcut(FL_Enter);
-        mini_start_->color(rust);
-        mini_start_->labelcolor(FL_WHITE);
-        mini_start_->labelfont(FL_HELVETICA_BOLD);
+        style_start_button(mini_start_, theme);
         mini_start_->labelsize(20);
         mini_start_->callback(on_mini_start, this);
 
         mini_progress_ = new Fl_Progress(x, 193, w, 24);
         mini_progress_->minimum(0);
         mini_progress_->maximum(1);
-        mini_progress_->color(field);
-        mini_progress_->selection_color(red);
-        mini_progress_->labelcolor(FL_WHITE);
+        mini_progress_->selection_color(theme.progress);
         mini_progress_->labelsize(12);
 
         // Two lines, so the longer messages wrap instead of being cut off.
         mini_status_ = new Fl_Box(x, 227, w, 44);
         mini_status_->align(FL_ALIGN_TOP_LEFT | FL_ALIGN_INSIDE | FL_ALIGN_WRAP | FL_ALIGN_CLIP);
-        mini_status_->labelcolor(text);
         mini_status_->labelsize(14);
 
         // No resizable widget: the window keeps its size.
@@ -476,7 +515,7 @@ private:
     }
 
     // The original window, kept as the fallback.
-    void build_full_view() {
+    void build_full_view(const Theme& theme) {
         full_window_ = new Fl_Double_Window(600, 415, "IGW Legacy Launcher " IGWL_VERSION);
         full_window_->callback(on_close, this);
 
@@ -502,20 +541,22 @@ private:
         current_->align(FL_ALIGN_TOP_LEFT);
         current_->minimum(0);
         current_->maximum(1);
-        current_->selection_color(FL_BLUE);
+        // The accent, to tell it apart from the overall progress below.
+        current_->selection_color(theme.accent);
         current_->labelsize(12);
 
         overall_ = new Fl_Progress(15, 340, 570, 20, "Overall");
         overall_->align(FL_ALIGN_TOP_LEFT);
         overall_->minimum(0);
         overall_->maximum(1);
-        overall_->selection_color(FL_DARK_GREEN);
+        overall_->selection_color(theme.progress);
         overall_->labelsize(12);
 
         cancel_button_ = new Fl_Button(385, 375, 95, 28, "Quit");
         cancel_button_->callback(on_cancel, this);
 
         start_button_ = new Fl_Return_Button(490, 375, 95, 28, "Start");
+        style_start_button(start_button_, theme);
         start_button_->callback(on_start, this);
 
         full_window_->resizable(log_);
@@ -786,8 +827,10 @@ int run_gui(const SyncOptions& options, const GuiContext& context, bool launch) 
     FcInit();
 #endif
     Fl::scheme("gtk+");
+    const Theme theme = launcher_theme();
+    apply_theme(theme);
 
-    LauncherWindow window(options, context, launch);
+    LauncherWindow window(options, context, launch, theme);
     return window.run();
 }
 
