@@ -47,7 +47,7 @@ add_link_options("$<$<CONFIG:Release,MinSizeRel>:-s>")
 # Compiled into the binary. Change the defaults here (dev.py does not pass
 # any -D options) or override them on a plain cmake command line.
 
-set(IGWL_BASE_URL "https://example.invalid/igwlegacy/" CACHE STRING
+set(IGWL_BASE_URL "https://igwlegacy.com/latest/" CACHE STRING
     "Base URL the game files are synced from; manifest.json, manifest.json.sig \
 and chunks/ are expected below it")
 
