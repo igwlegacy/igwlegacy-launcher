@@ -52,8 +52,9 @@ set(IGWL_BASE_URL "https://example.invalid/igwlegacy/" CACHE STRING
 and files/ are expected below it")
 
 # Hex encoded Ed25519 public key that manifest.json.sig must verify against.
-# `tools/manifest.py keygen` creates a key pair and prints this value.
-set(IGWL_MANIFEST_PUBLIC_KEY "" CACHE STRING
+# `tools/manifest.py keygen` creates a key pair and prints this value; the
+# default is the public half of the project's release signing key.
+set(IGWL_MANIFEST_PUBLIC_KEY "0784192f979658b3a14d765b22d045120bb63287696decf9b2ea70ded7f0e687" CACHE STRING
     "Hex encoded Ed25519 public key for verifying manifest.json")
 
 string(LENGTH "${IGWL_MANIFEST_PUBLIC_KEY}" _igwl_key_length)
