@@ -7,7 +7,11 @@
 //    of re-reading gigabytes on every start.
 // 3. Download what is needed into a temporary file, verify size and hash,
 //    and only then move it into place, so an interrupted sync never leaves a
-//    truncated or corrupt file behind.
+//    truncated or corrupt file behind. The server stores content only, as
+//    chunks named after their hash; files split into several chunks are
+//    reassembled in that temporary file, each chunk verified on its own as
+//    it arrives. Installed and already present files get the modification
+//    time and executable bit the manifest lists.
 // 4. Delete files that an earlier manifest installed but the current one no
 //    longer lists. Files the launcher never installed (saves, settings, ...)
 //    are never touched.
@@ -23,7 +27,7 @@
 namespace igwl {
 
 struct SyncOptions {
-    std::string base_url;        // manifest.json, manifest.json.sig, files/ below it
+    std::string base_url;        // manifest.json, manifest.json.sig, chunks/ below it
     std::string public_key_hex;  // Ed25519 key manifest.json.sig must verify against
     fs::path root;               // local directory to sync
     // The running launcher and its config file: never overwritten or

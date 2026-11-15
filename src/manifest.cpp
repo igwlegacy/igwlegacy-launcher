@@ -16,6 +16,17 @@ namespace {
 // one from making the launcher allocate or loop excessively.
 const std::size_t kMaxPathLength = 1024;
 const std::size_t kMaxFiles = 1000000;
+const std::size_t kMaxChunks = 10000000;
+
+// Latest accepted modification time, around the year 2242: well past
+// anything real, and small enough that converting it to any platform's file
+// time (down to nanoseconds in 64 bits) cannot overflow. Must match
+// MAX_MTIME in tools/manifest.py.
+const std::uint64_t kMaxMtime = 1ull << 33;
+
+// The manifest format this launcher understands; see manifest.h. Must match
+// MANIFEST_FORMAT in tools/manifest.py.
+const int kManifestFormat = 2;
 
 std::string ascii_lower(std::string text) {
     for (char& c : text) {
@@ -49,7 +60,52 @@ bool is_lower_hex(const std::string& text) {
     return true;
 }
 
+bool is_sha256_hex(const nlohmann::json& value) {
+    return value.is_string() && value.get_ref<const std::string&>().size() == 64 &&
+           is_lower_hex(value.get_ref<const std::string&>());
+}
+
+// Parses the "chunks" list of `file`'s JSON entry into `file.chunks`, adding
+// their number to `total_chunks`.
+void parse_chunks(const nlohmann::json& chunks, ManifestFile& file, std::size_t& total_chunks) {
+    if (!chunks.is_array() || chunks.empty()) {
+        throw std::runtime_error("manifest entry \"" + file.path + "\" has a malformed chunk list");
+    }
+    total_chunks += chunks.size();
+    if (total_chunks > kMaxChunks) {
+        throw std::runtime_error("manifest lists too many chunks");
+    }
+    std::uint64_t sum = 0;
+    for (const nlohmann::json& entry : chunks) {
+        if (!entry.is_object() || !entry.contains("size") || !entry["size"].is_number_unsigned() ||
+            !entry.contains("sha256") || !is_sha256_hex(entry["sha256"])) {
+            throw std::runtime_error("manifest entry \"" + file.path + "\" has a malformed chunk: " +
+                                     entry.dump());
+        }
+        ManifestChunk chunk;
+        chunk.size = entry["size"].get<std::uint64_t>();
+        chunk.sha256 = entry["sha256"].get<std::string>();
+        // Checked against `size` before adding, so the sum cannot overflow
+        // and wrap around to a matching value.
+        if (chunk.size == 0 || chunk.size > file.size - sum) {
+            throw std::runtime_error("manifest entry \"" + file.path +
+                                     "\" has chunks that do not add up to its size");
+        }
+        sum += chunk.size;
+        file.chunks.push_back(chunk);
+    }
+    if (sum != file.size) {
+        throw std::runtime_error("manifest entry \"" + file.path +
+                                 "\" has chunks that do not add up to its size");
+    }
+}
+
 }  // namespace
+
+std::string chunk_url_path(const ManifestChunk& chunk) {
+    // Plain lowercase hex, nothing to encode.
+    return "chunks/" + chunk.sha256;
+}
 
 bool is_valid_manifest_path(const std::string& path, std::string& reason) {
     if (path.empty()) {
@@ -122,8 +178,9 @@ Manifest parse_manifest(const std::string& text) {
     if (!document.is_object()) {
         throw std::runtime_error("manifest is not a JSON object");
     }
-    if (!document.contains("format") || document["format"] != 1) {
-        throw std::runtime_error("unsupported manifest format (this launcher understands format 1)");
+    if (!document.contains("format") || document["format"] != kManifestFormat) {
+        throw std::runtime_error("unsupported manifest format (this launcher understands format " +
+                                 std::to_string(kManifestFormat) + ")");
     }
 
     const nlohmann::json& files = document["files"];
@@ -138,10 +195,12 @@ Manifest parse_manifest(const std::string& text) {
     // Case-folded paths seen so far: names differing only in case collide on
     // Windows (and on case-insensitive file systems elsewhere).
     std::set<std::string> seen;
+    std::size_t total_chunks = 0;
     for (const nlohmann::json& entry : files) {
         if (!entry.is_object() || !entry.contains("path") || !entry["path"].is_string() ||
             !entry.contains("size") || !entry["size"].is_number_unsigned() ||
-            !entry.contains("sha256") || !entry["sha256"].is_string()) {
+            !entry.contains("sha256") || !entry["sha256"].is_string() ||
+            !entry.contains("mtime") || !entry["mtime"].is_number_unsigned()) {
             throw std::runtime_error("manifest has a malformed file entry: " + entry.dump());
         }
 
@@ -149,6 +208,10 @@ Manifest parse_manifest(const std::string& text) {
         file.path = entry["path"].get<std::string>();
         file.size = entry["size"].get<std::uint64_t>();
         file.sha256 = entry["sha256"].get<std::string>();
+        if (entry["mtime"].get<std::uint64_t>() > kMaxMtime) {
+            throw std::runtime_error("manifest entry \"" + file.path + "\" has an implausible mtime");
+        }
+        file.mtime = static_cast<std::int64_t>(entry["mtime"].get<std::uint64_t>());
         file.executable = entry.contains("executable") && entry["executable"] == true;
 
         std::string reason;
@@ -160,6 +223,18 @@ Manifest parse_manifest(const std::string& text) {
         }
         if (!seen.insert(ascii_lower(file.path)).second) {
             throw std::runtime_error("manifest lists \"" + file.path + "\" more than once");
+        }
+        if (entry.contains("chunks")) {
+            parse_chunks(entry["chunks"], file, total_chunks);
+        } else if (file.size > 0) {
+            // Stored whole: the single chunk is the file itself.
+            ManifestChunk whole;
+            whole.size = file.size;
+            whole.sha256 = file.sha256;
+            file.chunks.push_back(whole);
+            if (++total_chunks > kMaxChunks) {
+                throw std::runtime_error("manifest lists too many chunks");
+            }
         }
         manifest.files.push_back(file);
     }

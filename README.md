@@ -22,10 +22,24 @@ git submodule update --init
 The server holds three things below a base URL:
 
 ```
-<base>/manifest.json       every file of the game with size and SHA-256
+<base>/manifest.json       every file of the game: path, size, SHA-256,
+                           modification time, executable bit, and for
+                           split files the list of their chunks
 <base>/manifest.json.sig   Ed25519 signature of manifest.json (hex)
-<base>/files/<path>        the files themselves
+<base>/chunks/<sha256>     the content, named after its SHA-256
 ```
+
+The server holds no file names: every file's content is stored in
+`chunks/`, named after its SHA-256, and only the manifest says which path,
+modification time and executable bit it gets when installed. A file of up
+to 20 MB is a single chunk. The hosting provider refuses files larger than
+that, so `tools/manifest.py` splits larger ones into consecutive chunks of
+at most 20 MB, listed in order in the file's manifest entry. Chunks are
+plain byte ranges of the file, not compressed, since the game's large files
+are compressed already. The launcher downloads the chunks one after the
+other and appends them, which gives back the original file. Being named
+after their content, chunks never change once uploaded: identical data is
+stored once, and a new release only adds the chunks that are new.
 
 When Start is pressed (or with `--headless`), the launcher:
 
@@ -35,9 +49,12 @@ When Start is pressed (or with `--headless`), the launcher:
    `<game>/.igwl-launcher/state.json` together with size and modification
    time so unchanged files are not hashed again on every start;
 3. downloads what is missing or different into
-   `.igwl-launcher/download.part`, verifies size and hash and only then
-   renames it into place, so an interrupted or corrupted download never
-   replaces a working file;
+   `.igwl-launcher/download.part` (a split file chunk by chunk, checking
+   each chunk's size and hash as it arrives), verifies size and hash of the
+   whole file and only then renames it into place, so an interrupted or
+   corrupted download never replaces a working file. Downloaded and already
+   present files get the modification time and executable bit the manifest
+   lists;
 4. deletes files that an earlier manifest installed but the current one no
    longer lists. Files the launcher never installed (savegames, configs,
    mods) are never touched;
@@ -124,14 +141,32 @@ dependencies (Ed25519 included), so it also runs on the web server.
 # IGWL_MANIFEST_PUBLIC_KEY; keep the private key secret, off the web server
 ./tools/manifest.py keygen ~/igwlegacy-signing.key
 
-# per release: put the game into <publish>/files/, then
-./tools/manifest.py build <publish> --key ~/igwlegacy-signing.key \
+# per release: write the game into <publish>, split and signed
+./tools/manifest.py build <game> <publish> --key ~/igwlegacy-signing.key \
     --launch-windows game.exe --launch-linux game.sh
 ./tools/manifest.py verify <publish> --public-key <hex>   # optional
 # upload <publish>/ to the base URL; manifest.json and manifest.json.sig last
 ```
 
-Files with the executable bit set below `files/` are marked as executable
+`<game>` is the game directory as it should end up on the players'
+machines. `build` stores the content of its files in `<publish>/chunks/`,
+splitting those larger than 20 MB, and writes the signed manifest with
+each file's path, modification time and executable bit. It removes the
+chunks the new manifest no longer uses (`--keep-unreferenced` keeps them),
+so `<publish>` is an exact copy of what the server needs; chunks that exist
+already are not rewritten and keep their modification time, so upload
+tools can skip them. `--chunk-size`
+changes the 20 MB limit (in bytes; the default is 20,000,000, below the
+limit whether it means MB or MiB). `verify` reassembles every file from
+`<publish>` like the launcher does and reports anything larger than the
+limit.
+
+Uploading new chunks before the manifest keeps the server consistent for
+launchers syncing meanwhile. If unused chunks are deleted on the server
+only after the new manifest is up, even launchers still working from the
+previous manifest finish their sync.
+
+Files with the executable bit set below `<game>` are marked as executable
 in the manifest, and the launcher sets the bit on Linux. Paths that cannot
 exist on both Windows and Linux (reserved names like `CON`, characters such
 as `:` or `\`, names differing only in case) are rejected by the launcher.
@@ -143,7 +178,10 @@ as `:` or `\`, names differing only in case) are rejected by the launcher.
 * The launcher does not update itself and must not be listed in the
   manifest; the running binary and its config file are skipped if they
   are.
-* Files are always downloaded whole; there is no delta transfer.
+* A changed file is downloaded completely (all of its chunks, if split);
+  there is no delta transfer.
+* Launchers older than manifest format 2 refuse it with "unsupported
+  manifest format", and have to be replaced by a current one.
 
 ### Testing
 
@@ -151,11 +189,12 @@ as `:` or `\`, names differing only in case) are rejected by the launcher.
 ./tools/e2e-test.py build/linux-64-debug/bin/igwlegacy-launcher
 ```
 
-publishes a small signed test game, serves it on `127.0.0.1` and runs the
-launcher headless against it: download, rerun, repair, removal of dropped
-files, launch, the server URL from the config file, and refusal of
-tampered manifests and files. CI runs it on
-the linux-64 release binary.
+publishes a small signed test game with a small chunk size, so that it has
+single-chunk and split files, serves it on `127.0.0.1` and runs the launcher
+headless against it: download and reassembly, modification times and the
+executable bit, rerun, repair, a file growing beyond the chunk size, removal
+of dropped files, launch, the server URL from the config file, and refusal
+of tampered manifests and chunks. CI runs it on the linux-64 release binary.
 
 ## Quick start
 

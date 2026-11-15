@@ -330,7 +330,10 @@ private:
             if (known != state_.end() && known->second.size == file.size &&
                 known->second.sha256 == file.sha256 &&
                 known->second.mtime == modification_time(local)) {
-                ensure_mode(file, local);
+                // The content is right, but a new manifest may still carry
+                // another modification time.
+                ensure_metadata(file, local);
+                remember(file, local);
                 continue;
             }
             to_hash.push_back(&file);
@@ -354,8 +357,8 @@ private:
                 }
             });
             if (digest == file.sha256) {
+                ensure_metadata(file, local);
                 remember(file, local);
-                ensure_mode(file, local);
             } else {
                 state_.erase(file.path);
                 pending_.push_back(&file);
@@ -409,7 +412,7 @@ private:
                 throw std::runtime_error("could not replace " + file.path + ": " + error.message() +
                                          " (is the game still running?)");
             }
-            ensure_mode(file, local);
+            ensure_metadata(file, local);
             remember(file, local);
             completed += file.size;
             observer_.log("Updated " + file.path);
@@ -424,8 +427,10 @@ private:
         observer_.progress(1.0, 1.0);
     }
 
-    // Downloads one file into download_file_ and verifies it against the
-    // manifest. `on_progress` gets the bytes received so far.
+    // Downloads one file into download_file_ chunk by chunk, appending each
+    // to the previous ones, and verifies it against the manifest (an empty
+    // file has no chunks). `on_progress` gets the bytes of the file received
+    // so far.
     template <typename Callback>
     void download(const ManifestFile& file, Callback on_progress) {
         fs::ofstream output(download_file_, std::ios::binary | std::ios::trunc);
@@ -433,16 +438,48 @@ private:
             throw std::runtime_error("could not create " + download_file_.u8string());
         }
 
-        Sha256 hash;
+        Sha256 file_hash;
         std::uint64_t received = 0;
+        for (std::size_t i = 0; i < file.chunks.size(); ++i) {
+            const ManifestChunk& chunk = file.chunks[i];
+            // Names the chunk in error messages; the server-side name alone
+            // would not tell which file is affected.
+            const std::string what = file.chunks.size() == 1
+                                         ? file.path
+                                         : "chunk " + std::to_string(i + 1) + "/" +
+                                               std::to_string(file.chunks.size()) + " of " + file.path;
+            download_chunk(base_url_ + chunk_url_path(chunk), what, chunk, output, file_hash, received,
+                           on_progress);
+        }
+        output.close();
+        if (output.fail()) {
+            throw std::runtime_error("could not write " + download_file_.u8string() + " (disk full?)");
+        }
+        // Each chunk matched its own hash already, so this only fails if the
+        // manifest's chunk list does not describe the file it claims to.
+        if (received != file.size || file_hash.hex_digest() != file.sha256) {
+            throw std::runtime_error("reassembled " + file.path +
+                                     " does not match the manifest; manifest.json is inconsistent");
+        }
+    }
+
+    // Appends one chunk from `url` to `output`, feeding it into `file_hash`
+    // and advancing `received`, and checks it against `chunk` before the
+    // next one is fetched.
+    template <typename Callback>
+    void download_chunk(const std::string& url, const std::string& what, const ManifestChunk& chunk,
+                        fs::ofstream& output, Sha256& file_hash, std::uint64_t& received,
+                        Callback on_progress) {
+        Sha256 hash;
+        std::uint64_t got = 0;
         bool write_failed = false;
         try {
             http_.get(
-                base_url_ + "files/" + url_encode_path(file.path),
+                url,
                 [&](const char* data, std::size_t size) {
                     // Refuse more data than announced right away instead of
                     // filling the disk with whatever the server sends.
-                    if (received + size > file.size) {
+                    if (got + size > chunk.size) {
                         return false;
                     }
                     output.write(data, static_cast<std::streamsize>(size));
@@ -451,33 +488,33 @@ private:
                         return false;
                     }
                     hash.update(data, size);
-                    received += size;
+                    file_hash.update(data, size);
+                    got += size;
                     return true;
                 },
                 [&](std::uint64_t, std::uint64_t) {
-                    on_progress(received);
+                    on_progress(received + got);
                     return !cancel_.load();
                 });
         } catch (const SinkAborted&) {
             // The sink above refused data: either the disk write failed
             // (reported below) or the server sent more than announced.
             if (!write_failed) {
-                throw std::runtime_error("the server sent more data for " + file.path +
+                throw std::runtime_error("the server sent more data for " + what +
                                          " than manifest.json lists; the server copy is "
                                          "inconsistent with manifest.json");
             }
         }
-        output.close();
 
-        if (write_failed || output.fail()) {
-            throw std::runtime_error("could not write " + download_file_.u8string() +
-                                     " (disk full?)");
+        if (write_failed) {
+            throw std::runtime_error("could not write " + download_file_.u8string() + " (disk full?)");
         }
-        if (received != file.size || hash.hex_digest() != file.sha256) {
-            throw std::runtime_error("downloaded " + file.path +
+        if (got != chunk.size || hash.hex_digest() != chunk.sha256) {
+            throw std::runtime_error("downloaded " + what +
                                      " does not match the manifest; the server copy is "
                                      "inconsistent with manifest.json");
         }
+        received += got;
     }
 
     // Step 4: delete what earlier syncs installed but the manifest dropped.
@@ -533,9 +570,24 @@ private:
         state_[file.path] = known;
     }
 
-    void ensure_mode(const ManifestFile& file, const fs::path& local) {
+    // Gives a file whose content matches the manifest the executable bit
+    // and modification time the manifest lists. Call before remember(), so
+    // the state file records the modification time set here.
+    void ensure_metadata(const ManifestFile& file, const fs::path& local) {
         if (file.executable) {
             platform::make_executable(local);
+        }
+        const fs::file_time_type wanted =
+            std::chrono::system_clock::time_point(std::chrono::seconds(file.mtime));
+        std::error_code error;
+        if (fs::last_write_time(local, error) != wanted || error) {
+            // Not worth failing the sync over: the content is what matters,
+            // and the next sync tries again.
+            fs::last_write_time(local, wanted, error);
+            if (error) {
+                observer_.log("Could not set the modification time of " + file.path + ": " +
+                              error.message());
+            }
         }
     }
 

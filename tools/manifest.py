@@ -3,9 +3,21 @@
 
 Server layout, below the URL compiled into the launcher (IGWL_BASE_URL):
 
-    manifest.json         list of files with size and SHA-256
+    manifest.json         every file of the game: path, size, SHA-256,
+                          modification time, executable bit, and for split
+                          files the list of their chunks
     manifest.json.sig     hex encoded Ed25519 signature of manifest.json
-    files/...             the game files themselves
+    chunks/<sha256>       the content, named after its SHA-256: a file of at
+                          most --chunk-size bytes as a single chunk, larger
+                          ones split into chunks of at most --chunk-size
+                          bytes, which the launcher downloads and concatenates
+
+The hosting provider limits files to 20 MB, hence the default --chunk-size.
+Chunks are plain byte ranges of the files, not compressed (game data usually
+is already). Only manifest.json knows which file a chunk belongs to. Being
+named after their content, chunks never change once written: identical data
+is stored once, a rebuild only adds the chunks that are new, and clients can
+keep downloading while new chunks are uploaded.
 
 Typical use:
 
@@ -13,10 +25,11 @@ Typical use:
     ./tools/manifest.py keygen ~/igwlegacy-signing.key
     # -> prints the public key for IGWL_MANIFEST_PUBLIC_KEY in CMakeLists.txt
 
-    # on every release: put the game files into <publish>/files/, then
-    ./tools/manifest.py build <publish> --key ~/igwlegacy-signing.key \\
+    # on every release: split the game into <publish> and sign the manifest
+    ./tools/manifest.py build <game> <publish> --key ~/igwlegacy-signing.key \\
         --launch-windows game.exe --launch-linux game.sh
-    # and upload <publish> to the web server
+    # then upload <publish> to the web server: chunks/ first, then
+    # manifest.json and manifest.json.sig
 
     # optionally check a publish directory against a public key
     ./tools/manifest.py verify <publish> --public-key <hex>
@@ -37,6 +50,22 @@ from pathlib import Path
 # Must match kStateDirectory in src/manifest.cpp; the launcher keeps its own
 # data there and rejects manifests that place files inside it.
 STATE_DIRECTORY = ".igwl-launcher"
+
+# Manifest format written by `build`; must match kManifestFormat in
+# src/manifest.cpp.
+MANIFEST_FORMAT = 2
+
+# The hosting provider refuses files larger than 20 MB. Decimal megabytes, so
+# the default stays below the limit whether it is meant as MB or MiB.
+DEFAULT_CHUNK_SIZE = 20 * 1000 * 1000
+
+# Latest modification time the launcher accepts, around the year 2242; must
+# match kMaxMtime in src/manifest.cpp.
+MAX_MTIME = 1 << 33
+
+# Directory below the publish directory (and the base URL) holding the
+# chunks; must match chunk_url_path() in src/manifest.cpp.
+CHUNK_DIRECTORY = "chunks"
 
 # --- Ed25519, after the reference implementation in RFC 8032, section 6 -------
 
@@ -195,26 +224,116 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def _collect_files(files_dir):
-    """Every regular file below `files_dir` as manifest entries, sorted by path."""
+def chunk_relative_path(digest):
+    """Where a chunk lives below the publish directory (and the base URL)."""
+    return f"{CHUNK_DIRECTORY}/{digest}"
+
+
+def _is_chunk_name(name):
+    return len(name) == 64 and all(c in "0123456789abcdef" for c in name)
+
+
+def _write_chunk(publish, data):
+    """Stores `data` as a chunk unless it exists already; returns its entry."""
+    digest = hashlib.sha256(data).hexdigest()
+    target = publish / chunk_relative_path(digest)
+    # Same name means same content, so an existing chunk is left alone (and
+    # keeps its modification time, so upload tools comparing times skip it);
+    # its size is still checked to repair a chunk truncated by a crash.
+    if not target.is_file() or target.stat().st_size != len(data):
+        temporary = target.with_name(target.name + ".tmp")
+        temporary.write_bytes(data)
+        os.replace(temporary, target)
+    return {"sha256": digest, "size": len(data)}
+
+
+def _split_file(path, publish, chunk_size):
+    """Stores the content of `path` as chunks below `publish`.
+
+    Returns the SHA-256 of the whole file, its size and the list of chunk
+    entries in file order: a single one named after the whole file's hash
+    if it fits into `chunk_size` bytes, none for an empty file.
+    """
+    whole = hashlib.sha256()
+    chunks = []
+    size = 0
+    with open(path, "rb") as handle:
+        for data in iter(lambda: handle.read(chunk_size), b""):
+            whole.update(data)
+            chunks.append(_write_chunk(publish, data))
+            size += len(data)
+    return whole.hexdigest(), size, chunks
+
+
+def _collect_files(game_dir, publish, chunk_size):
+    """Every regular file below `game_dir` as manifest entries, sorted by path.
+
+    Writes the content of every file as chunks below `publish`. Entries of
+    files that fit into a single chunk carry no chunk list: their content is
+    the chunk named after their own SHA-256.
+    """
     entries = []
-    for directory, subdirectories, names in os.walk(files_dir):
+    for directory, subdirectories, names in os.walk(game_dir):
         # Deterministic traversal; symlinked directories are not followed.
         subdirectories.sort()
         for name in sorted(names):
             full = Path(directory) / name
-            relative = full.relative_to(files_dir).as_posix()
+            relative = full.relative_to(game_dir).as_posix()
             info = full.stat()
             if not stat.S_ISREG(info.st_mode):
                 sys.exit(f"manifest.py: {full} is not a regular file")
             if relative.split("/", 1)[0].lower() == STATE_DIRECTORY:
                 sys.exit(f"manifest.py: {relative} is inside the launcher's state directory")
-            entry = {"path": relative, "size": info.st_size, "sha256": _sha256(full)}
+            digest, size, chunks = _split_file(full, publish, chunk_size)
+            # Files are read in pieces, so a file growing or shrinking
+            # meanwhile would otherwise go unnoticed.
+            if size != info.st_size:
+                sys.exit(f"manifest.py: {full} changed while it was being read")
+            mtime = int(info.st_mtime)
+            if not 0 <= mtime <= MAX_MTIME:
+                sys.exit(f"manifest.py: {full} has a modification time before 1970 or after "
+                         "2242, which the launcher refuses; touch it")
+            entry = {
+                "path": relative,
+                "size": size,
+                "sha256": digest,
+                # Whole seconds since the Unix epoch, which every file system
+                # the launcher runs on can represent.
+                "mtime": mtime,
+            }
+            if len(chunks) > 1:
+                entry["chunks"] = chunks
             if info.st_mode & stat.S_IXUSR:
                 entry["executable"] = True
             entries.append(entry)
     entries.sort(key=lambda entry: entry["path"])
     return entries
+
+
+def _entry_chunks(entry):
+    """The chunks a manifest entry is assembled from, in order."""
+    if "chunks" in entry:
+        return entry["chunks"]
+    if entry["size"] == 0:
+        return []
+    return [{"sha256": entry["sha256"], "size": entry["size"]}]
+
+
+def _remove_unreferenced(publish, referenced):
+    """Deletes chunks (and leftover temporary files) the manifest does not use.
+
+    Only touches names in chunks/ that look like chunks, so the publish
+    directory mirrors exactly what the server needs.
+    """
+    removed = 0
+    for chunk in sorted((publish / CHUNK_DIRECTORY).iterdir()):
+        name = chunk.name[:-len(".tmp")] if chunk.name.endswith(".tmp") else chunk.name
+        if not chunk.is_file() or not _is_chunk_name(name):
+            continue
+        if chunk.name != name or name not in referenced:
+            chunk.unlink()
+            removed += 1
+    return removed
 
 
 def command_keygen(args):
@@ -232,23 +351,35 @@ def command_keygen(args):
 
 
 def command_build(args):
+    game_dir = Path(args.game_dir)
     publish = Path(args.publish_dir)
-    files_dir = publish / "files"
-    if not files_dir.is_dir():
-        sys.exit(f"manifest.py: {files_dir} does not exist; put the game files there")
+    if not game_dir.is_dir():
+        sys.exit(f"manifest.py: {game_dir} is not a directory")
+    if args.chunk_size <= 0:
+        sys.exit("manifest.py: --chunk-size must be positive")
+    # Writing chunks into the tree being split would make them part of the
+    # game (and the walk would pick up its own output).
+    game_resolved, publish_resolved = game_dir.resolve(), publish.resolve()
+    if (publish_resolved == game_resolved or game_resolved in publish_resolved.parents
+            or publish_resolved in game_resolved.parents):
+        sys.exit("manifest.py: the game and publish directories must not contain each other")
     secret = _read_secret(args.key)
 
-    files = _collect_files(files_dir)
+    (publish / CHUNK_DIRECTORY).mkdir(parents=True, exist_ok=True)
+    files = _collect_files(game_dir, publish, args.chunk_size)
     listed = {entry["path"] for entry in files}
     launch = {}
     for platform, program in (("windows", args.launch_windows), ("linux", args.launch_linux)):
         if program is None:
             continue
         if program not in listed:
-            sys.exit(f"manifest.py: launch program {program} is not below {files_dir}")
+            sys.exit(f"manifest.py: launch program {program} is not below {game_dir}")
         launch[platform] = program
 
-    manifest = {"format": 1, "files": files}
+    referenced = {chunk["sha256"] for entry in files for chunk in _entry_chunks(entry)}
+    removed = 0 if args.keep_unreferenced else _remove_unreferenced(publish, referenced)
+
+    manifest = {"format": MANIFEST_FORMAT, "files": files}
     if launch:
         manifest["launch"] = launch
     # Stable formatting, so rebuilding an unchanged tree yields identical
@@ -261,8 +392,11 @@ def command_build(args):
     (publish / "manifest.json").write_bytes(data)
     (publish / "manifest.json.sig").write_text(signature.hex() + "\n")
     total = sum(entry["size"] for entry in files)
-    print(f"{publish / 'manifest.json'}: {len(files)} files, {total} bytes, signed with "
-          f"public key {ed25519_public_key(secret).hex()}")
+    split = sum("chunks" in entry for entry in files)
+    print(f"{publish / 'manifest.json'}: {len(files)} files ({split} split), {total} bytes in "
+          f"{len(referenced)} chunks of at most {args.chunk_size} bytes"
+          + (f", {removed} unreferenced chunks removed" if removed else "")
+          + f", signed with public key {ed25519_public_key(secret).hex()}")
 
 
 def command_verify(args):
@@ -271,12 +405,37 @@ def command_verify(args):
     signature = bytes.fromhex((publish / "manifest.json.sig").read_text().strip())
     if not ed25519_verify(bytes.fromhex(args.public_key), data, signature):
         sys.exit("manifest.py: signature INVALID for this public key")
+    manifest = json.loads(data)
+    if manifest.get("format") != MANIFEST_FORMAT:
+        sys.exit(f"manifest.py: manifest format {manifest.get('format')} is not "
+                 f"{MANIFEST_FORMAT}")
     problems = 0
-    for entry in json.loads(data)["files"]:
-        path = publish / "files" / entry["path"]
-        if not path.is_file() or path.stat().st_size != entry["size"] or _sha256(path) != entry["sha256"]:
-            print(f"mismatch: {entry['path']}")
-            problems += 1
+    for entry in manifest["files"]:
+        sources = [(publish / chunk_relative_path(chunk["sha256"]), chunk["size"],
+                    chunk["sha256"]) for chunk in _entry_chunks(entry)]
+        # Reassembles the file exactly like the launcher does, checking every
+        # piece and the result.
+        whole = hashlib.sha256()
+        size = 0
+        broken = False
+        for path, expected_size, expected_digest in sources:
+            if args.max_size and expected_size > args.max_size:
+                print(f"too large for the server: {path} ({expected_size} bytes)")
+                broken = True
+            if not path.is_file():
+                print(f"missing: {path} of {entry['path']}")
+                broken = True
+                continue
+            content = path.read_bytes()
+            if len(content) != expected_size or hashlib.sha256(content).hexdigest() != expected_digest:
+                print(f"corrupt: {path} of {entry['path']}")
+                broken = True
+            whole.update(content)
+            size += len(content)
+        if not broken and (size != entry["size"] or whole.hexdigest() != entry["sha256"]):
+            print(f"mismatch: {entry['path']} does not reassemble to its size and hash")
+            broken = True
+        problems += broken
     if problems:
         sys.exit(f"manifest.py: {problems} files do not match the manifest")
     print("signature valid, all files match")
@@ -291,18 +450,29 @@ def main():
     keygen.add_argument("key_file", help="where to write the private key")
     keygen.set_defaults(func=command_keygen)
 
-    build = subparsers.add_parser("build", help="write and sign manifest.json")
-    build.add_argument("publish_dir", help="directory whose files/ subdirectory holds the game")
+    build = subparsers.add_parser(
+        "build", help="split the game into chunks, write and sign manifest.json")
+    build.add_argument("game_dir", help="directory holding the game as it is to be installed")
+    build.add_argument("publish_dir",
+                       help="where manifest.json, manifest.json.sig and chunks/ are written")
     build.add_argument("--key", required=True, help="private key file from `keygen`")
+    build.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, metavar="BYTES",
+                       help="files larger than this are split into chunks of at most this "
+                            f"many bytes (default {DEFAULT_CHUNK_SIZE})")
+    build.add_argument("--keep-unreferenced", action="store_true",
+                       help="keep chunks below publish_dir that the new manifest does not use")
     build.add_argument("--launch-windows", metavar="PATH",
-                       help="program (below files/) the Windows launcher starts")
+                       help="program (below game_dir) the Windows launcher starts")
     build.add_argument("--launch-linux", metavar="PATH",
-                       help="program (below files/) the Linux launcher starts")
+                       help="program (below game_dir) the Linux launcher starts")
     build.set_defaults(func=command_build)
 
     verify = subparsers.add_parser("verify", help="check signature and files of a publish dir")
     verify.add_argument("publish_dir")
     verify.add_argument("--public-key", required=True, help="hex encoded public key")
+    verify.add_argument("--max-size", type=int, default=DEFAULT_CHUNK_SIZE, metavar="BYTES",
+                        help="report chunks larger than this "
+                             f"(default {DEFAULT_CHUNK_SIZE}, 0 to disable)")
     verify.set_defaults(func=command_verify)
 
     args = parser.parse_args()

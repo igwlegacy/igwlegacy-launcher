@@ -58,9 +58,6 @@ private:
 // Must be called once at startup, before any thread creates an HttpClient.
 void http_global_init();
 
-// Percent-encodes every byte of `path` except unreserved characters and '/'.
-std::string url_encode_path(const std::string& path);
-
 }  // namespace igwl
 
 #endif

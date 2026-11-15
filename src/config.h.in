@@ -3,7 +3,7 @@
 #ifndef IGWL_CONFIG_H
 #define IGWL_CONFIG_H
 
-// Where manifest.json, manifest.json.sig and files/ are fetched from.
+// Where manifest.json, manifest.json.sig and chunks/ are fetched from.
 #define IGWL_BASE_URL "@IGWL_BASE_URL@"
 
 // Hex encoded Ed25519 public key; empty if the build has none configured.

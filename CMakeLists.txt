@@ -49,7 +49,7 @@ add_link_options("$<$<CONFIG:Release,MinSizeRel>:-s>")
 
 set(IGWL_BASE_URL "https://example.invalid/igwlegacy/" CACHE STRING
     "Base URL the game files are synced from; manifest.json, manifest.json.sig \
-and files/ are expected below it")
+and chunks/ are expected below it")
 
 # Hex encoded Ed25519 public key that manifest.json.sig must verify against.
 # `tools/manifest.py keygen` creates a key pair and prints this value; the

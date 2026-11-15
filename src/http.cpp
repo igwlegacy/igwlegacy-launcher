@@ -144,22 +144,4 @@ std::string HttpClient::get_string(const std::string& url, std::size_t max_size,
     return body;
 }
 
-std::string url_encode_path(const std::string& path) {
-    static const char digits[] = "0123456789ABCDEF";
-    std::string encoded;
-    for (unsigned char c : path) {
-        const bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                                (c >= '0' && c <= '9') || c == '-' || c == '.' ||
-                                c == '_' || c == '~' || c == '/';
-        if (unreserved) {
-            encoded.push_back(static_cast<char>(c));
-        } else {
-            encoded.push_back('%');
-            encoded.push_back(digits[c >> 4]);
-            encoded.push_back(digits[c & 0x0f]);
-        }
-    }
-    return encoded;
-}
-
 }  // namespace igwl
