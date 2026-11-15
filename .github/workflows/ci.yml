@@ -19,10 +19,15 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.publish-release && 'release' || 'build' }}
   cancel-in-progress: ${{ !inputs.publish-release }}
 
+# Read-only by default; only the job that publishes the release gets more.
+permissions:
+  contents: read
+
 env:
-  # Every file `./dev.py dist` is expected to produce. Spelled out explicitly
-  # so that a missing or unexpected artifact fails the run instead of a
-  # release silently shipping with fewer files.
+  # Every file the combined dist/ is expected to hold, the same set a local
+  # `./dev.py dist` produces. Spelled out explicitly so that a missing or
+  # unexpected artifact fails the run instead of a release silently shipping
+  # with fewer files.
   DIST_FILES: >-
     igwlegacy-launcher-32bit
     igwlegacy-launcher
@@ -31,25 +36,20 @@ env:
     SHA256SUMS
 
 jobs:
-  build:
+  # Resolves the version and, for a release, makes sure the release does not
+  # exist yet before any time is spent on the builds.
+  version:
     runs-on: ubuntu-latest
-    permissions:
-      # Only needed to create the release; the build steps never push.
-      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      # The vendored libraries are submodules. Not recursive: mbedTLS has a
-      # nested `framework` submodule that the build does not use.
       - uses: actions/checkout@v7
-        with:
-          submodules: true
 
-      # Resolve the version and make sure the release does not exist yet
-      # before spending time on the build.
       - name: Determine release version
-        if: inputs.publish-release
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
+          PUBLISH: ${{ inputs.publish-release }}
         run: |
           version=$(sed -nE 's/^project\([^)]*VERSION ([0-9][0-9.]*).*$/\1/p' CMakeLists.txt)
           if [ -z "$version" ]; then
@@ -57,12 +57,40 @@ jobs:
             exit 1
           fi
           tag="v$version"
-          if gh release view "$tag" >/dev/null 2>&1 \
-             || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
-            echo "::error::release or tag $tag already exists, bump the version in CMakeLists.txt"
-            exit 1
+          if [ "$PUBLISH" = "true" ]; then
+            if gh release view "$tag" >/dev/null 2>&1 \
+               || git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "::error::release or tag $tag already exists, bump the version in CMakeLists.txt"
+              exit 1
+            fi
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  # One runner per platform, all in parallel. Each one builds and verifies a
+  # single platform and uploads it as an intermediate artifact for `dist`.
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      # A release needs every platform, so one failure cancels the rest.
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-64
+            file: igwlegacy-launcher
+          - platform: linux-32
+            file: igwlegacy-launcher-32bit
+          - platform: win-64
+            file: igwlegacy-launcher.exe
+          - platform: win-32
+            file: igwlegacy-launcher-32bit.exe
+    name: build (${{ matrix.platform }})
+    steps:
+      # The vendored libraries are submodules. Not recursive: mbedTLS has a
+      # nested `framework` submodule that the build does not use.
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       # Installs the exact toolchain from pixi.lock; dev.py re-executes itself
       # through `pixi run --locked`, so the pixi binary on PATH is all it needs.
@@ -72,18 +100,19 @@ jobs:
           locked: true
           cache: true
 
-      # `repro` runs `dist` and then rebuilds everything independently from a
-      # different path with cold caches, so whatever gets published has also
-      # been verified to be bit-for-bit reproducible.
+      # `repro` runs `dist` and then rebuilds the platform independently from
+      # a different path with cold caches, so whatever gets published has
+      # also been verified to be bit-for-bit reproducible.
       - name: Build and verify reproducibility
-        run: ./dev.py repro
+        run: ./dev.py repro -t ${{ matrix.platform }}
 
-      - name: Verify artifacts
+      - name: Verify artifact
         working-directory: dist
+        env:
+          FILE: ${{ matrix.file }}
         run: |
-          # Exactly the expected files, nothing missing and nothing extra.
-          read -r -a files <<< "$DIST_FILES"
-          expected=$(printf '%s\n' "${files[@]}" | sort)
+          # Exactly this platform's file and its checksum, nothing else.
+          expected=$(printf '%s\n' "$FILE" SHA256SUMS | sort)
           actual=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
           if [ "$expected" != "$actual" ]; then
             echo "::error::dist/ does not match the expected file list"
@@ -95,6 +124,7 @@ jobs:
       # The binary links the system's X11 libraries even when it never opens
       # a window; make sure they are there instead of relying on the image.
       - name: Install runtime libraries
+        if: matrix.platform == 'linux-64'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -104,12 +134,73 @@ jobs:
       # multilib packages or wine; a quick run catches a broken link step.
       # Without --version it would try to open its window.
       - name: Smoke test linux-64 binary
+        if: matrix.platform == 'linux-64'
         run: ./dist/igwlegacy-launcher --version | grep -E '^igwlegacy-launcher [0-9]'
 
       # Syncs a freshly signed test game from a local HTTP server, including
       # the tampering cases that must be refused.
       - name: End-to-end test linux-64 binary
+        if: matrix.platform == 'linux-64'
         run: python3 -I tools/e2e-test.py dist/igwlegacy-launcher
+
+      # Only an intermediate for `dist`, which uploads the combined artifact.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.platform }}-${{ github.sha }}
+          path: |
+            dist/${{ matrix.file }}
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+
+  # Combines the per-platform builds into the dist/ a local `./dev.py dist`
+  # writes, uploads it and, if asked to, publishes it as the release. Only
+  # runs once every platform built and passed, so nothing gets published
+  # from a partial set.
+  dist:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      # Only needed to create the release.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*-${{ github.sha }}
+          path: parts
+
+      - name: Combine artifacts
+        run: |
+          read -r -a files <<< "$DIST_FILES"
+          mkdir dist
+          for part in parts/*/; do
+            # Checked where it was downloaded to, which also catches a file
+            # damaged on its way between the jobs.
+            (cd "$part" && sha256sum --strict -c SHA256SUMS)
+            find "$part" -mindepth 1 -maxdepth 1 ! -name SHA256SUMS \
+              -exec mv -n -t dist {} +
+          done
+
+          # The same SHA256SUMS `./dev.py dist` writes: one line per file,
+          # sorted by file name in byte order.
+          cat parts/*/SHA256SUMS | LC_ALL=C sort -k2 > dist/SHA256SUMS
+
+          # Exactly the expected files, nothing missing and nothing extra.
+          expected=$(printf '%s\n' "${files[@]}" | sort)
+          actual=$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::dist/ does not match the expected file list"
+            diff <(echo "$expected") <(echo "$actual") || true
+            exit 1
+          fi
+          # Every binary listed exactly once, so no part's checksum can hide
+          # behind another one for the same name.
+          if [ "$(wc -l < dist/SHA256SUMS)" -ne $(( ${#files[@]} - 1 )) ]; then
+            echo "::error::SHA256SUMS does not list every binary exactly once"
+            cat dist/SHA256SUMS
+            exit 1
+          fi
+          (cd dist && sha256sum --strict -c SHA256SUMS)
 
       - uses: actions/upload-artifact@v7
         with:
@@ -129,7 +220,8 @@ jobs:
         if: inputs.publish-release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
         working-directory: dist
         run: |
           read -r -a files <<< "$DIST_FILES"

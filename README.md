@@ -210,7 +210,9 @@ of tampered manifests and chunks. CI runs it on the linux-64 release binary.
 ./dev.py run -r             # build for the host and run the binary
 ./dev.py run -t win-64      # build for Windows and run it through wine
 ./dev.py dist               # release build of everything into ./dist
+./dev.py dist -t win-64     # the same for 64 bit Windows only
 ./dev.py repro              # dist, then check an independent build matches
+./dev.py repro -t win-64    # the same for 64 bit Windows only
 ./dev.py clean              # remove build/ and dist/
 ```
 
@@ -323,6 +325,12 @@ so zig's libc++, libc++abi and libc startup code are compiled from scratch
 rather than reused. It fails if any artifact differs and keeps both trees
 around for inspection (e.g. with `diffoscope`). The copy includes
 uncommitted changes, so it can be run before committing.
+
+CI runs `./dev.py repro -t <platform>` for every platform on a runner of its
+own, in parallel. A single-platform `dist` writes a `SHA256SUMS` with just
+that platform's line, so a final job concatenates and sorts the four into
+the same `dist/` a full local `./dev.py dist` gives, uploads it and, when
+started with `publish-release`, publishes it as the GitHub release.
 
 ## Using CMake directly
 
