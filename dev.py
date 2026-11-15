@@ -274,12 +274,19 @@ def scratch_sources(destination):
 
     Tracked files plus untracked ones that are not ignored, so that the check
     covers uncommitted work too, while build trees, dist and the pixi
-    environment stay behind.
+    environment stay behind. The vendored libraries in vendor/ are git
+    submodules; their tracked files are included as well.
     """
-    listing = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=ROOT, check=True, capture_output=True).stdout.decode()
-    for name in filter(None, listing.split("\0")):
+    def listing(*options):
+        output = subprocess.run(["git", "ls-files", "-z", *options],
+                                cwd=ROOT, check=True, capture_output=True).stdout.decode()
+        return list(filter(None, output.split("\0")))
+
+    # git refuses --recurse-submodules together with --others, hence two
+    # calls: tracked files of the project and its submodules, then the
+    # project's untracked ones.
+    names = listing("--cached", "--recurse-submodules") + listing("--others", "--exclude-standard")
+    for name in names:
         source = ROOT / name
         # Deleted but not yet committed files are still listed as cached.
         if not source.is_file():
