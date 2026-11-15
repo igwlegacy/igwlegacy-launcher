@@ -11,7 +11,9 @@ binaries for every supported Linux and Windows target:
     ./dev.py run -r                # build for the host and run the binary
     ./dev.py run -t win-64         # the same for Windows, through wine
     ./dev.py dist                  # release build of every platform into ./dist
+    ./dev.py dist -t win-64        # the same for 64 bit Windows only
     ./dev.py repro                 # check that ./dist is reproducible
+    ./dev.py repro -t win-64       # the same for 64 bit Windows only
     ./dev.py clean
 """
 
@@ -179,8 +181,12 @@ def build_one(target, config, jobs=None, clean=False):
          "--component", "launcher"])
 
 
-def resolve_targets(args):
-    """The platforms a command was asked to build, defaulting to the host."""
+def resolve_targets(args, default_all=False):
+    """The platforms a command was asked to build.
+
+    Without -t that is the host, or every platform for the commands that
+    pass `default_all`.
+    """
     if getattr(args, "all", False):
         return sorted(PLATFORMS)
     if args.target:
@@ -188,7 +194,10 @@ def resolve_targets(args):
         if unknown:
             sys.exit("dev.py: unknown platform {}; `./dev.py build -t` "
                      "lists the supported ones".format(", ".join(unknown)))
-        return args.target
+        # Order-preserving dedup, so that `-t x -t x` builds x once.
+        return list(dict.fromkeys(args.target))
+    if default_all:
+        return sorted(PLATFORMS)
     return [host_platform()]
 
 
@@ -251,12 +260,16 @@ def command_run(args):
 
 
 def command_dist(args):
-    """Builds every platform in release mode and collects it into ./dist.
+    """Builds every platform (or those given with -t) in release mode and
+    collects them into ./dist.
 
     The directory is rebuilt from scratch, so artifacts of a platform dropped
     in the meantime cannot linger, and SHA256SUMS is what `repro` compares.
+    SHA256SUMS lists only the platforms built, one line each, so the files of
+    separate single-platform runs (as on CI) can be concatenated and sorted
+    into the one a full `dist` writes.
     """
-    targets = sorted(PLATFORMS)
+    targets = sorted(resolve_targets(args, default_all=True))
     for target in targets:
         print(f"\n== {target} (Release) ==", flush=True)
         build_one(target, "Release", jobs=args.jobs, clean=args.clean)
@@ -340,6 +353,9 @@ def command_repro(args):
 
         print(f"\n== independent build in {checkout} ==", flush=True)
         dist_command = [sys.executable, checkout / "dev.py", "dist"]
+        # The same platforms as the first build, so both write the same files.
+        for target in resolve_targets(args, default_all=True):
+            dist_command += ["--target", target]
         if args.jobs:
             dist_command += ["--jobs", str(args.jobs)]
         run(dist_command, env=env, cwd=scratch)
@@ -419,6 +435,8 @@ def main():
     dist = subparsers.add_parser(
         "dist", help="release build of every platform, collected into ./dist")
     add_jobs_flag(dist)
+    add_target_flag(dist, "only this platform (repeatable, default: all); "
+                          "with no value, list the platforms instead")
     dist.add_argument("--clean", action="store_true",
                       help="discard the existing build directories first")
     dist.set_defaults(func=command_dist)
@@ -426,6 +444,8 @@ def main():
     repro = subparsers.add_parser(
         "repro", help="run dist, then verify an independent build matches it")
     add_jobs_flag(repro)
+    add_target_flag(repro, "only this platform (repeatable, default: all); "
+                           "with no value, list the platforms instead")
     repro.add_argument("--clean", action="store_true",
                        help="discard the existing build directories first")
     repro.add_argument("--keep", action="store_true",
