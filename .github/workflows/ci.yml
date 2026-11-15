@@ -37,7 +37,11 @@ jobs:
       # Only needed to create the release; the build steps never push.
       contents: write
     steps:
+      # The vendored libraries are submodules. Not recursive: mbedTLS has a
+      # nested `framework` submodule that the build does not use.
       - uses: actions/checkout@v7
+        with:
+          submodules: true
 
       # Resolve the version and make sure the release does not exist yet
       # before spending time on the build.
@@ -88,10 +92,24 @@ jobs:
           fi
           sha256sum --strict -c SHA256SUMS
 
+      # The binary links the system's X11 libraries even when it never opens
+      # a window; make sure they are there instead of relying on the image.
+      - name: Install runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-6 libxrender1 libxft2 libfontconfig1
+
       # The host binary is the only one runnable on the runner without extra
       # multilib packages or wine; a quick run catches a broken link step.
+      # Without --version it would try to open its window.
       - name: Smoke test linux-64 binary
-        run: ./dist/igwlegacy-launcher-linux-64 | grep -E '^igwlegacy-launcher [0-9]'
+        run: ./dist/igwlegacy-launcher-linux-64 --version | grep -E '^igwlegacy-launcher [0-9]'
+
+      # Syncs a freshly signed test game from a local HTTP server, including
+      # the tampering cases that must be refused.
+      - name: End-to-end test linux-64 binary
+        run: python3 -I tools/e2e-test.py dist/igwlegacy-launcher-linux-64
 
       - uses: actions/upload-artifact@v7
         with:
