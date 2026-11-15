@@ -90,10 +90,15 @@ _igwl_wrapper(_igwl_ar     zig-ar     ar)
 _igwl_wrapper(_igwl_ranlib zig-ranlib ranlib)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
-    # CMake enables the RC language for Windows targets and insists on a real
-    # program even while there is not a single .rc file to compile.
+    # zig rc compiles the launcher's resources (the .exe icon), and CMake
+    # enables the RC language for Windows targets anyway.
     _igwl_wrapper(_igwl_rc zig-rc rc)
     set(CMAKE_RC_COMPILER "${_igwl_rc}" CACHE FILEPATH "zig rc" FORCE)
+    # CMake's default rule, minus a detail: zig rc takes options with a
+    # leading / just like rc.exe, so an absolute Unix source path looks like
+    # one and only works after a note about the guess. The -- ends the options.
+    set(CMAKE_RC_COMPILE_OBJECT
+        "<CMAKE_RC_COMPILER> <DEFINES> <INCLUDES> <FLAGS> /fo <OBJECT> -- <SOURCE>")
 endif()
 
 set(CMAKE_C_COMPILER "${_igwl_cc}")

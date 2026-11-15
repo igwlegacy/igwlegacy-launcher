@@ -1,0 +1,14 @@
+// Windows resources of the launcher, compiled by `zig rc` for the Windows
+// targets only (see CMakeLists.txt).
+//
+// The first icon resource of an executable is the one Explorer, shortcuts
+// and the taskbar show for it. assets/logo.ico is generated from
+// assets/logo.png and holds every size Windows commonly asks for, so it never
+// has to scale a large image down to 16x16 itself; regenerate it with
+//
+//   magick assets/logo.png \
+//          -define icon:auto-resize=256,128,64,48,32,24,16 assets/logo.ico
+//
+// The path is relative to src/, the directory of this file, which the
+// resource compiler searches first.
+1 ICON "../assets/logo.ico"

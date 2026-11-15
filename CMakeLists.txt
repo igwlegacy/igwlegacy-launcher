@@ -146,6 +146,13 @@ if(WIN32)
     # but ignores, producing a console program that opens a terminal window
     # next to the launcher. Telling the linker directly works.
     target_link_options(igwlegacy_launcher PRIVATE "LINKER:--subsystem,windows")
+
+    # The icon shown for the .exe in Explorer, shortcuts and the taskbar.
+    target_sources(igwlegacy_launcher PRIVATE src/icon.rc)
+    # The resource compiler does not see what the .rc includes, so a changed
+    # icon would otherwise not trigger a rebuild.
+    set_source_files_properties(src/icon.rc PROPERTIES
+        OBJECT_DEPENDS "${CMAKE_SOURCE_DIR}/assets/logo.ico")
 endif()
 
 target_compile_options(igwlegacy_launcher PRIVATE -Wall -Wextra -Wpedantic)

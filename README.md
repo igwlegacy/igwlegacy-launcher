@@ -91,6 +91,10 @@ update, use the colours of the logo (`Theme` in `src/gui.cpp`).
 The logo (`assets/logo_flat.png`) is compiled into the binary by
 `cmake/EmbedFile.cmake`, so the launcher stays a single file.
 
+The Windows executables carry `assets/logo.ico` as their icon, through the
+resource script `src/icon.rc`. The `.ico` is generated from
+`assets/logo.png`; the command to regenerate it is in `src/icon.rc`.
+
 ### Command line
 
 ```
@@ -360,6 +364,8 @@ printed diagnostic. Release builds are unaffected.
 | `src/`                     | The launcher: `gui`, `sync`, `manifest`, `settings`, `http`, `crypto`, `platform`, `assets.h` |
 | `vendor/`                  | The libraries, as git submodules                         |
 | `assets/logo_flat.png`     | The logo shown in the window, embedded at build time     |
+| `assets/logo.png`          | The square logo `assets/logo.ico` is generated from      |
+| `assets/logo.ico`          | Icon of the Windows executables (`src/icon.rc`)          |
 | `CMakeLists.txt`           | The project, including configuration and reproducibility flags |
 | `cmake/Vendor.cmake`       | Builds the vendored libraries with pinned options        |
 | `cmake/EmbedFile.cmake`    | Turns a file into a C++ array (used for the logo)        |
